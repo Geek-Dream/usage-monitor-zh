@@ -1,0 +1,247 @@
+package com.usagemonitor.presentation.ui
+
+import kotlin.time.Instant
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toLocalDateTime
+import com.usagemonitor.domain.entity.UsageExportFormat
+import com.usagemonitor.domain.entity.ACTIVITY_TIME_ZONE_ID
+import com.usagemonitor.domain.entity.ApiUsageStats
+import com.usagemonitor.domain.entity.AppLanguage
+import com.usagemonitor.domain.entity.CliSessionRange
+import com.usagemonitor.domain.entity.CliSessionSummary
+import com.usagemonitor.domain.entity.CliUsageBreakdown
+import com.usagemonitor.domain.entity.CodexCliSessionSummary
+import com.usagemonitor.domain.repository.UsageExportEncoder
+import com.usagemonitor.presentation.ui.report.UsageReportDocument
+
+/**
+ * O que gravar, já pronto, e o nome sugerido no diálogo de arquivo.
+ *
+ * [Text] cobre CSV e JSON; [Report] carrega o documento do relatório e **não** o
+ * PDF. Quem transforma um no outro é o desktop: o gerador de PDF é JVM-only, e
+ * trazê-lo para cá levaria uma dependência de biblioteca para dentro do
+ * `commonMain` só para atravessar uma fronteira.
+ */
+sealed interface UsageExportPayload {
+    data class Text(val content: String) : UsageExportPayload
+    data class Report(val document: UsageReportDocument, val language: AppLanguage? = null) : UsageExportPayload
+
+    /**
+     * Arquivo já pronto em bytes (análise da sessão, B21b: o PDF de uma página que o bot também
+     * manda). Não é `data class`: igualdade de `ByteArray` é por referência.
+     */
+    class Binary(val content: ByteArray) : UsageExportPayload
+}
+
+data class UsageExportRequest(
+    val suggestedFileName: String,
+    val payload: UsageExportPayload
+)
+
+/**
+ * Monta o conteúdo da exportação.
+ *
+ * Função pura: quem grava é a camada desktop, que recebe isto pronto. É o que
+ * permite testar o formato sem tocar em disco nem abrir diálogo. O texto sai de
+ * [UsageExportEncoder], porta do domain implementada em `data`.
+ */
+fun exportRequestForSessions(
+    encoder: UsageExportEncoder,
+    sessions: List<CliSessionSummary>,
+    range: CliSessionRange,
+    format: UsageExportFormat,
+    now: Instant,
+    timeZone: TimeZone = TimeZone.of(ACTIVITY_TIME_ZONE_ID)
+): UsageExportRequest {
+    return UsageExportRequest(
+        suggestedFileName = exportFileName("sessions", range, format, now, timeZone),
+        payload = UsageExportPayload.Text(encoder.encodeSessions(sessions, format))
+    )
+}
+
+fun exportRequestForBreakdown(
+    encoder: UsageExportEncoder,
+    breakdown: CliUsageBreakdown,
+    range: CliSessionRange,
+    format: UsageExportFormat,
+    now: Instant,
+    timeZone: TimeZone = TimeZone.of(ACTIVITY_TIME_ZONE_ID)
+): UsageExportRequest {
+    return UsageExportRequest(
+        suggestedFileName = exportFileName("breakdown", range, format, now, timeZone),
+        payload = UsageExportPayload.Text(encoder.encodeBreakdown(breakdown, format))
+    )
+}
+
+fun exportRequestForCodexCliSessions(
+    encoder: UsageExportEncoder,
+    sessions: List<CodexCliSessionSummary>,
+    range: CliSessionRange,
+    format: UsageExportFormat,
+    now: Instant,
+    timeZone: TimeZone = TimeZone.of(ACTIVITY_TIME_ZONE_ID)
+): UsageExportRequest {
+    val local = now.toLocalDateTime(timeZone).date
+    val month = local.monthNumber.toString().padStart(2, '0')
+    val day = local.dayOfMonth.toString().padStart(2, '0')
+    return UsageExportRequest(
+        suggestedFileName = "usage-monitor-codex-cli-${rangeSlug(range)}-${local.year}-$month-$day.${format.extension}",
+        payload = UsageExportPayload.Text(encoder.encodeCodexCliSessions(sessions, format))
+    )
+}
+
+/**
+ * Relatório PDF do recorte que está na tela.
+ *
+ * Irmão de [exportRequestForSessions], e não um valor a mais em
+ * [UsageExportFormat]: os `when` exaustivos do exportador de texto são sobre formato
+ * de texto, e um `PDF` ali obrigaria um ramo impossível em cada um deles.
+ */
+fun reportRequest(
+    document: UsageReportDocument,
+    range: CliSessionRange,
+    now: Instant,
+    /**
+     * Idioma do rodapé, do "continua" e dos dias da semana do PDF (#384). Sem ele
+     * o escritor usava o próprio padrão (PT), e um relatório pedido em inglês saía
+     * com o corpo em inglês e o rodapé em português.
+     */
+    language: AppLanguage? = null,
+    timeZone: TimeZone = TimeZone.of(ACTIVITY_TIME_ZONE_ID)
+): UsageExportRequest {
+    return UsageExportRequest(
+        suggestedFileName = reportFileName(range, now, timeZone),
+        payload = UsageExportPayload.Report(document, language)
+    )
+}
+
+/** PDF da comparação: `usage-monitor-comparison-7d-2026-10-06.pdf` (#386). */
+fun comparisonReportRequest(
+    document: UsageReportDocument,
+    range: CliSessionRange,
+    now: Instant,
+    language: AppLanguage,
+    timeZone: TimeZone = TimeZone.of(ACTIVITY_TIME_ZONE_ID)
+): UsageExportRequest {
+    val local = now.toLocalDateTime(timeZone).date
+    val month = local.monthNumber.toString().padStart(2, '0')
+    val day = local.dayOfMonth.toString().padStart(2, '0')
+    return UsageExportRequest(
+        suggestedFileName = "usage-monitor-comparison-${rangeSlug(range)}-${local.year}-$month-$day.pdf",
+        payload = UsageExportPayload.Report(document, language)
+    )
+}
+
+/** PDF do modal do Codex: `usage-monitor-codex-report-5h-2026-10-06.pdf`. */
+fun codexReportRequest(
+    document: UsageReportDocument,
+    range: CliSessionRange,
+    now: Instant,
+    language: AppLanguage,
+    timeZone: TimeZone = TimeZone.of(ACTIVITY_TIME_ZONE_ID)
+): UsageExportRequest {
+    val local = now.toLocalDateTime(timeZone).date
+    val month = local.monthNumber.toString().padStart(2, '0')
+    val day = local.dayOfMonth.toString().padStart(2, '0')
+    return UsageExportRequest(
+        suggestedFileName = "usage-monitor-codex-report-${rangeSlug(range)}-${local.year}-$month-$day.pdf",
+        payload = UsageExportPayload.Report(document, language)
+    )
+}
+
+/**
+ * Retrato do Dashboard: todas as cotas de todas as fontes, na coleta corrente
+ * (issue #215). Sempre CSV — o rodapé oferece um clique, não uma escolha de
+ * formato — e sem janela no nome, ao contrário de [exportRequestForSessions]:
+ * o Dashboard não tem intervalo selecionável, é sempre "agora".
+ */
+fun exportRequestForDashboard(
+    encoder: UsageExportEncoder,
+    stats: List<ApiUsageStats>,
+    now: Instant,
+    timeZone: TimeZone = TimeZone.of(ACTIVITY_TIME_ZONE_ID)
+): UsageExportRequest {
+    val local = now.toLocalDateTime(timeZone).date
+    val month = local.monthNumber.toString().padStart(2, '0')
+    val day = local.dayOfMonth.toString().padStart(2, '0')
+    return UsageExportRequest(
+        suggestedFileName = "usage-monitor-dashboard-${local.year}-$month-$day.csv",
+        payload = UsageExportPayload.Text(encoder.encodeDashboardSnapshot(stats, now))
+    )
+}
+
+/** `usage-monitor-report-5h-2026-08-17.pdf`, no mesmo padrão de [exportFileName]. */
+internal fun reportFileName(
+    range: CliSessionRange,
+    now: Instant,
+    timeZone: TimeZone
+): String {
+    val local = now.toLocalDateTime(timeZone).date
+    val month = local.monthNumber.toString().padStart(2, '0')
+    val day = local.dayOfMonth.toString().padStart(2, '0')
+    return "usage-monitor-report-${rangeSlug(range)}-${local.year}-$month-$day.pdf"
+}
+
+/**
+ * Nome como `usage-monitor-sessions-5h-2026-08-16.csv`.
+ *
+ * A janela entra no nome porque dois arquivos exportados no mesmo dia com
+ * recortes diferentes seriam indistinguíveis na pasta de destino.
+ */
+internal fun exportFileName(
+    scope: String,
+    range: CliSessionRange,
+    format: UsageExportFormat,
+    now: Instant,
+    timeZone: TimeZone
+): String {
+    val local = now.toLocalDateTime(timeZone).date
+    val month = local.monthNumber.toString().padStart(2, '0')
+    val day = local.dayOfMonth.toString().padStart(2, '0')
+    return "usage-monitor-$scope-${rangeSlug(range)}-${local.year}-$month-$day.${format.extension}"
+}
+
+private fun rangeSlug(range: CliSessionRange): String {
+    return when (range) {
+        CliSessionRange.LAST_5H -> "5h"
+        CliSessionRange.LAST_7D -> "7d"
+        CliSessionRange.LAST_30D -> "30d"
+        CliSessionRange.ALL -> "total"
+    }
+}
+
+/** Traduz o resultado da exportação; o estado carrega só o fato. */
+internal fun exportOutcomeMessage(
+    outcome: com.usagemonitor.presentation.viewmodel.CliExportOutcome,
+    language: AppLanguage
+): String {
+    return when (outcome) {
+        is com.usagemonitor.presentation.viewmodel.CliExportOutcome.Saved ->
+            ExportLabels.exportSaved(outcome.path, language)
+        is com.usagemonitor.presentation.viewmodel.CliExportOutcome.Failed ->
+            ExportLabels.exportFailed(outcome.message, language)
+    }
+}
+
+internal object ExportLabels {
+
+    fun exportCsv(language: AppLanguage): String {
+        return localized(language, "Exportar CSV", "Export CSV")
+    }
+
+    fun exportJson(language: AppLanguage): String {
+        return localized(language, "Exportar JSON", "Export JSON")
+    }
+
+    fun exportPdf(language: AppLanguage): String {
+        return localized(language, "Relatório PDF", "PDF report")
+    }
+
+    fun exportSaved(path: String, language: AppLanguage): String {
+        return localized(language, "Exportado para $path", "Exported to $path")
+    }
+
+    fun exportFailed(message: String, language: AppLanguage): String {
+        return localized(language, "Falha ao exportar: $message", "Export failed: $message")
+    }
+}

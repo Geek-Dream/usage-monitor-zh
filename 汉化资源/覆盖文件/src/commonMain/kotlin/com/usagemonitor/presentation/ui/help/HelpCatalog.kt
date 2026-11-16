@@ -1,0 +1,118 @@
+package com.usagemonitor.presentation.ui.help
+
+import com.usagemonitor.domain.entity.AppLanguage
+import com.usagemonitor.presentation.ui.ZhTranslations
+
+/**
+ * Tópicos da janela de ajuda.
+ *
+ * Um por bloco de funcionalidade, e não um por controle: a lista existe para
+ * responder "o que este app faz e como ligo isso", e vinte e cinco entradas
+ * granulares respondem à pergunta errada — vira índice de Configurações, que já
+ * tem navegação própria.
+ *
+ * **Exceção aprovada à regra de não crescer enum** (#411): os valores de
+ * [ACCOUNTS] a [WEB_ACCESS] entraram para cobrir funções que a ajuda não
+ * mostrava. O único `when` exaustivo sobre este enum é o do catálogo, que é
+ * exatamente onde a entrada faltando tem de quebrar a compilação.
+ */
+enum class HelpTopic {
+    DASHBOARD,
+    HISTORY,
+    CLI_SESSIONS,
+    BREAKDOWN,
+    BUDGET,
+    ALERTS,
+    EXPORT,
+    TEAM,
+    PRESENCE,
+    WINDOW_MODES,
+    APPEARANCE,
+    UPDATES,
+    ACCOUNTS,
+    SESSION_ANALYSIS,
+    COMPARISON,
+    TELEGRAM_BOT,
+    WEB_ACCESS
+}
+
+/**
+ * O que a ajuda mostra de um tópico.
+ *
+ * [steps] é o "como ativar" e é o motivo de esta tela existir: descrição sem
+ * caminho de ativação descreve algo que o leitor não consegue alcançar. Os
+ * passos citam o rótulo **real** do controle — trocar o rótulo na tela sem
+ * trocar aqui manda o usuário procurar um botão que não existe.
+ *
+ * [mediaId] nomeia o recurso `help/<mediaId>.gif`. Não é anulável: todo tópico
+ * tem demo, e quem trata ausência é o tocador, que degrada para texto.
+ */
+data class HelpEntry(
+    val title: String,
+    val summary: String,
+    val description: String,
+    val steps: List<String>,
+    val mediaId: String
+)
+
+/**
+ * Catálogo bilíngue das funcionalidades.
+ *
+ * Mesmo desenho de `CliSessionsGlossary`: enum de tópicos, [readingOrder] e uma
+ * função que devolve a entrada no idioma. Aqui não são rótulos — são definições
+ * e caminhos de ativação, e o `when` exaustivo do Kotlin só pega a entrada
+ * faltando, nunca a entrada vazia ou não traduzida; por isso os testes.
+ *
+ * O texto sai do README, que é a documentação do produto, e os passos saem do
+ * código: nome real da aba de Configurações, rótulo real do interruptor, atalho
+ * real do `onKeyEvent`.
+ */
+object HelpCatalog {
+
+    /**
+     * Ordem de leitura: do que se vê ao abrir o app para o que se liga depois.
+     *
+     * Integrações primeiro porque é o que se liga antes de haver o que ler; os
+     * modos de janela e a aparência no fim porque são preferências, e quem chega
+     * aqui pela primeira vez procura o que o app mede. Cada tópico novo da #411
+     * entra ao lado do vizinho de assunto: análise e comparação com as leituras,
+     * bot e navegador depois dos alertas, que eles repassam.
+     */
+    val readingOrder: List<HelpTopic> = listOf(
+        HelpTopic.DASHBOARD,
+        HelpTopic.ACCOUNTS,
+        HelpTopic.HISTORY,
+        HelpTopic.SESSION_ANALYSIS,
+        HelpTopic.CLI_SESSIONS,
+        HelpTopic.BREAKDOWN,
+        HelpTopic.COMPARISON,
+        HelpTopic.BUDGET,
+        HelpTopic.ALERTS,
+        HelpTopic.TELEGRAM_BOT,
+        HelpTopic.WEB_ACCESS,
+        HelpTopic.EXPORT,
+        HelpTopic.TEAM,
+        HelpTopic.PRESENCE,
+        HelpTopic.WINDOW_MODES,
+        HelpTopic.APPEARANCE,
+        HelpTopic.UPDATES
+    )
+
+    fun entry(topic: HelpTopic, language: AppLanguage): HelpEntry {
+        return when (language) {
+            AppLanguage.PT -> portugueseHelpEntry(topic)
+            AppLanguage.EN -> englishHelpEntry(topic)
+            AppLanguage.ZH -> englishHelpEntry(topic).translated()
+        }
+    }
+
+    /** Recurso da demo, sem depender do idioma: as demos são geradas só em PT. */
+    fun mediaId(topic: HelpTopic): String = portugueseHelpEntry(topic).mediaId
+
+    private fun HelpEntry.translated(): HelpEntry = copy(
+        title = ZhTranslations.of(title),
+        summary = ZhTranslations.of(summary),
+        description = ZhTranslations.of(description),
+        steps = steps.map { step -> ZhTranslations.of(step) }
+    )
+}

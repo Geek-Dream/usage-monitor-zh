@@ -1,0 +1,335 @@
+package com.usagemonitor.presentation.ui.components
+
+import com.usagemonitor.presentation.ui.localized
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Column
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import com.usagemonitor.domain.entity.AppLanguage
+import com.usagemonitor.domain.entity.AppUpdatePlatform
+import com.usagemonitor.domain.entity.AppUpdateReceipt
+import com.usagemonitor.domain.entity.AppUpdateReceiptStatus
+import com.usagemonitor.domain.repository.AppUpdateSupport
+import com.usagemonitor.domain.repository.UPDATE_FEED_URL_ENV_VAR
+
+/**
+ * [available] falso: o processo roda com `--user-data-dir` (issue #419). A
+ * entrada de inicialização não leva a pasta, e o login abriria a instância
+ * padrão. Desligado, o interruptor diz o motivo (contrato do `AppSwitch`) e
+ * mostra desligado, e não o valor do sistema, que pertence à outra instância.
+ */
+@Composable
+fun AutoStartToggle(
+    enabled: Boolean,
+    language: AppLanguage = AppLanguage.PT,
+    onToggle: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+    showDivider: Boolean = true,
+    available: Boolean = true
+) {
+    val isPt = language == AppLanguage.PT
+    SettingsOptionRow(
+        label = localized(language, "Inicialização com Sistema", "System Startup"),
+        description = when {
+            !available && isPt ->
+                "Indisponível com --user-data-dir: a entrada de inicialização abriria o app na pasta padrão, não nesta."
+            !available ->
+                "Unavailable with --user-data-dir: the startup entry would open the app on the default folder, not this one."
+            isPt -> "Registra a aplicação na inicialização do usuário atual."
+            else -> "Registers the app to launch with the current user session."
+        },
+        showDivider = showDivider,
+        modifier = modifier
+    ) {
+        AppSwitch(checked = enabled && available, onCheckedChange = { onToggle(it) }, enabled = available)
+    }
+}
+
+/**
+ * "Reduzir animações": para quem se incomoda com movimento, e para máquina lenta
+ * em que a transição vira tranco. O texto diz o que some — as transições **e** o
+ * que gira ou pulsa —, porque as duas coisas desligam juntas.
+ */
+@Composable
+fun ReducedMotionToggle(
+    enabled: Boolean,
+    language: AppLanguage = AppLanguage.PT,
+    onToggle: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+    showDivider: Boolean = true
+) {
+    val isPt = language == AppLanguage.PT
+    SettingsOptionRow(
+        label = localized(language, "Reduzir animações", "Reduce motion"),
+        description = localized(language, "Troca telas, barras e menus de uma vez, sem transição, e desliga o que gira ou pulsa para indicar sessão ativa.", "Switches screens, bars and menus at once, without transitions, and turns off what spins or pulses to show an active session."),
+        showDivider = showDivider,
+        modifier = modifier
+    ) {
+        AppSwitch(
+            checked = enabled,
+            onCheckedChange = { onToggle(it) },
+            modifier = Modifier.testTag(REDUCED_MOTION_SWITCH_TEST_TAG)
+        )
+    }
+}
+
+/**
+ * Anel de uso no ícone da bandeja (issue #328): o maior percentual entre as cotas
+ * vigentes, lido sem abrir a janela. O texto diz de qual cota é o número, porque
+ * o anel não diz — quem quer saber a fonte passa o ponteiro no ícone.
+ */
+@Composable
+fun TrayUsageRingToggle(
+    enabled: Boolean,
+    language: AppLanguage = AppLanguage.PT,
+    onToggle: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+    showDivider: Boolean = true
+) {
+    val isPt = language == AppLanguage.PT
+    SettingsOptionRow(
+        label = localized(language, "Anel de uso na bandeja", "Usage ring in the tray"),
+        description = localized(language, "Desenha em volta do ícone da bandeja o maior percentual entre as cotas vigentes. A dica do ícone continua listando cada conta.", "Draws the highest percentage among the current quotas around the tray icon. The icon tooltip still lists every account."),
+        showDivider = showDivider,
+        modifier = modifier
+    ) {
+        AppSwitch(
+            checked = enabled,
+            onCheckedChange = { onToggle(it) },
+            modifier = Modifier.testTag(TRAY_USAGE_RING_SWITCH_TEST_TAG)
+        )
+    }
+}
+
+/** Interruptor da dica do dia (#411), nas Configurações e no próprio modal. */
+const val STARTUP_TIPS_SWITCH_TEST_TAG = "startupTipsSwitch"
+
+/**
+ * Dica do dia ao abrir (#411). O texto diz **quando** ela aparece — uma por dia,
+ * inclusive na abertura pelo início com o sistema —, porque é isso que decide se
+ * ela incomoda. É o mesmo controle nas Configurações › Sistema e no modal da
+ * dica: dois interruptores para o mesmo valor divergiriam.
+ */
+@Composable
+fun StartupTipsToggle(
+    enabled: Boolean,
+    language: AppLanguage = AppLanguage.PT,
+    onToggle: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+    showDivider: Boolean = true
+) {
+    val isPt = language == AppLanguage.PT
+    SettingsOptionRow(
+        label = startupTipsToggleLabel(language),
+        description = localized(
+            language,
+            "Uma por dia, na primeira abertura do dia, inclusive pelo início com o sistema. Todas as funções continuam na Ajuda.",
+            "One a day, on the day's first opening, startup with the system included. Every feature stays in Help."
+        ),
+        showDivider = showDivider,
+        modifier = modifier
+    ) {
+        AppSwitch(
+            checked = enabled,
+            onCheckedChange = { onToggle(it) },
+            modifier = Modifier.testTag(STARTUP_TIPS_SWITCH_TEST_TAG)
+        )
+    }
+}
+
+/** O rótulo é citado na Ajuda e nas dicas; sai de uma função para não divergir. */
+fun startupTipsToggleLabel(language: AppLanguage): String {
+    return localized(language, "Mostrar a dica do dia ao abrir", "Show the tip of the day on opening")
+}
+
+/**
+ * Atualização automática: baixar a versão nova em segundo plano e aplicá-la ao
+ * fechar o app.
+ *
+ * O texto de apoio diz o tamanho e o momento porque **os dois surpreendem**: são
+ * ~120 MB por versão, sem atualização delta, e a troca dos arquivos acontece sem
+ * nenhuma confirmação no instante em que o usuário fecha a janela. Interruptor
+ * que não avisa disso liga uma coisa que o usuário não escolheu.
+ *
+ * Desabilitado, ele carrega **o motivo**. Um controle cinza sem explicação é pior
+ * que controle nenhum: o usuário não descobre se é limitação da plataforma, da
+ * instalação, ou defeito.
+ */
+@Composable
+fun AutoUpdateToggle(
+    enabled: Boolean,
+    support: AppUpdateSupport,
+    /** Ver [autoUpdateHint]: `null` é plataforma não reconhecida. */
+    platform: AppUpdatePlatform? = null,
+    language: AppLanguage = AppLanguage.PT,
+    lastReceipt: AppUpdateReceipt? = null,
+    /**
+     * Valor de `USAGE_MONITOR_UPDATE_FEED_URL`, quando definida. Nunca nulo em
+     * ambiente de teste e sempre nulo em produção — o aviso na tela é o que
+     * impede alguém de rodar com o feed trocado sem perceber.
+     */
+    feedUrlOverride: String? = null,
+    onToggle: (Boolean) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isSupported = support == AppUpdateSupport.SUPPORTED
+    val label = localized(language, "Atualização automática", "Automatic updates")
+
+    AppDataRow(modifier = modifier, showDivider = true) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .testTag(AUTO_UPDATE_TEXT_BLOCK_TEST_TAG)
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = autoUpdateHint(support = support, language = language, platform = platform),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (lastReceipt != null) {
+                Text(
+                    text = lastUpdateReceiptLine(receipt = lastReceipt, language = language),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag(AUTO_UPDATE_RECEIPT_TEST_TAG)
+                )
+            }
+            if (!feedUrlOverride.isNullOrBlank()) {
+                // Tom de aviso porque é isso que ele é: com o feed trocado, o
+                // SHA-256 que barra artefato adulterado passa a vir de outro lugar.
+                Text(
+                    text = localized(language, "Aviso: o feed de releases está sobrescrito por $UPDATE_FEED_URL_ENV_VAR ($feedUrlOverride). Só para teste.", "Warning: the release feed is overridden by $UPDATE_FEED_URL_ENV_VAR ($feedUrlOverride). Testing only."),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AppTone.WARNING.color(),
+                    modifier = Modifier.testTag(AUTO_UPDATE_FEED_OVERRIDE_TEST_TAG)
+                )
+            }
+        }
+        AppSwitch(
+            // Sem suporte o interruptor mostra desligado, e não o que está
+            // guardado: ligado-mas-inerte seria uma promessa falsa.
+            checked = enabled && isSupported,
+            onCheckedChange = { onToggle(it) },
+            enabled = isSupported,
+            modifier = Modifier.testTag(AUTO_UPDATE_SWITCH_TEST_TAG)
+        )
+    }
+}
+
+/**
+ * Canal beta (issue #355): receber também as versões marcadas como beta, para
+ * testar mudanças antes da release estável.
+ *
+ * Independe da atualização automática: sem ela a beta só é anunciada, como
+ * qualquer versão. O texto diz as duas coisas que o usuário precisa saber antes
+ * de ligar — que beta pode ter defeitos, e que desligar **não volta** para a
+ * estável anterior.
+ */
+/** Constantes porque o passo da ajuda cita o rótulo, e uma cópia literal lá divergiria. */
+internal const val BETA_UPDATES_LABEL_PT = "Receber versões beta"
+internal const val BETA_UPDATES_LABEL_EN = "Receive beta updates"
+
+@Composable
+fun BetaUpdatesToggle(
+    enabled: Boolean,
+    language: AppLanguage = AppLanguage.PT,
+    onToggle: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+    showDivider: Boolean = true
+) {
+    val isPt = language == AppLanguage.PT
+    SettingsOptionRow(
+        label = if (isPt) BETA_UPDATES_LABEL_PT else BETA_UPDATES_LABEL_EN,
+        description = localized(language, "Oferece também as versões beta, que chegam antes da estável e podem ter defeitos. Desligar não volta para a versão anterior: o app fica na beta até sair uma estável mais nova.", "Also offers beta versions, which arrive before the stable release and may have bugs. Turning it off does not roll back: the app stays on the beta until a newer stable release comes out."),
+        showDivider = showDivider,
+        modifier = modifier
+    ) {
+        AppSwitch(
+            checked = enabled,
+            onCheckedChange = { onToggle(it) },
+            modifier = Modifier.testTag(BETA_UPDATES_SWITCH_TEST_TAG)
+        )
+    }
+}
+
+/**
+ * O motivo que acompanha o interruptor, por plataforma.
+ *
+ * A [platform] entrou porque dois dos motivos **mudam de conteúdo** conforme o
+ * sistema: `UNSUPPORTED_PLATFORM` significava "não é Windows" e passou a
+ * significar "é macOS ou algo que não reconhecemos", e
+ * `UNSUPPORTED_INSTALL_ORIGIN` fala de MSI no Windows e de `.deb`/`.rpm` no
+ * Linux. Sem ela, o texto continuaria afirmando no Linux coisas que deixaram de
+ * ser verdade.
+ *
+ * `null` é plataforma **não reconhecida** — e não um default de conveniência:
+ * quem não sabe onde está não pode nomear o instalador certo, e o texto genérico
+ * é o que sobra de honesto.
+ */
+internal fun autoUpdateHint(
+    support: AppUpdateSupport,
+    language: AppLanguage,
+    platform: AppUpdatePlatform? = null
+): String {
+    return when (support) {
+        AppUpdateSupport.SUPPORTED -> localized(language, "Baixa a versão nova em segundo plano (~120 MB) e a aplica ao fechar o app.", "Downloads the new version in the background (~120 MB) and applies it on exit.")
+
+        AppUpdateSupport.UNSUPPORTED_PLATFORM -> when (platform) {
+            AppUpdatePlatform.MACOS -> localized(language, "Não disponível no macOS: o pacote não é assinado e o Gatekeeper exige liberação manual.", "Not available on macOS: the package is unsigned and Gatekeeper requires manual approval.")
+
+            else -> localized(language, "Não disponível nesta plataforma. A atualização automática cobre Windows e Linux em user-space.", "Not available on this platform. Automatic updates cover Windows and user-space Linux.")
+        }
+
+        AppUpdateSupport.UNSUPPORTED_INSTALL_ORIGIN -> when (platform) {
+            AppUpdatePlatform.LINUX -> localized(language, "Disponível apenas na instalação em user-space feita pelo instalador .sh. Esta cópia veio de um pacote .deb/.rpm ou de fora dele, e atualizá-la por aqui mexeria em arquivos do gerenciador de pacotes.", "Only available for the user-space install made by the .sh installer. This copy came from a .deb/.rpm package or from outside it, and updating it here would touch files owned by the package manager.")
+
+            AppUpdatePlatform.WINDOWS -> localized(language, "Disponível apenas na instalação feita pelo instalador .exe. Esta cópia veio do MSI ou de fora dele, e atualizá-la por aqui criaria uma segunda instalação.", "Only available for installs made by the .exe installer. This copy came from the MSI or from outside it, and updating it here would create a second install.")
+
+            else -> localized(language, "Disponível apenas nas instalações feitas pelo instalador oficial do aplicativo.", "Only available for installs made by the app's official installer.")
+        }
+
+        // O texto não nomeia a arquitetura desta máquina: quem a lê é
+        // `os.arch`, e o valor bruto ("aarch64") não diz nada a quem instalou.
+        AppUpdateSupport.UNSUPPORTED_ARCHITECTURE -> localized(language, "Não há pacote publicado para a arquitetura desta máquina. A atualização automática cobre apenas x86_64.", "No package is published for this machine's architecture. Automatic updates cover x86_64 only.")
+
+        AppUpdateSupport.ISOLATED_DATA_ROOT -> localized(language, "Indisponível com --user-data-dir: o instalador reabre o app na pasta padrão. Atualize pela instância sem a opção.", "Unavailable with --user-data-dir: the installer reopens the app on the default folder. Update from the instance without the option.")
+
+        AppUpdateSupport.UNAVAILABLE -> localized(language, "Esta versão do aplicativo ainda não traz a atualização automática.", "This build does not ship automatic updates yet.")
+    }
+}
+
+internal fun autoUpdateHint(
+    support: AppUpdateSupport,
+    isPt: Boolean,
+    platform: AppUpdatePlatform? = null
+): String = autoUpdateHint(
+    support = support,
+    language = if (isPt) AppLanguage.PT else AppLanguage.EN,
+    platform = platform
+)
+
+internal fun lastUpdateReceiptLine(receipt: AppUpdateReceipt, language: AppLanguage): String {
+    val from = receipt.previousVersion?.let { previous -> "$previous → " }.orEmpty()
+    return when (receipt.status) {
+        AppUpdateReceiptStatus.SUCCESS -> localized(language, "Última atualização: $from${receipt.version}, concluída.", "Last update: $from${receipt.version}, completed.")
+
+        AppUpdateReceiptStatus.FAILED -> {
+            val reason = receipt.reason?.let { value -> " ($value)" }.orEmpty()
+            localized(language, "Última atualização: $from${receipt.version} falhou$reason. A versão instalada não foi alterada.", "Last update: $from${receipt.version} failed$reason. The installed version was left untouched.")
+        }
+    }
+}
+
+internal fun lastUpdateReceiptLine(receipt: AppUpdateReceipt, isPt: Boolean): String =
+    lastUpdateReceiptLine(receipt, if (isPt) AppLanguage.PT else AppLanguage.EN)

@@ -1,0 +1,459 @@
+package com.usagemonitor.presentation.ui.components
+
+import com.usagemonitor.presentation.ui.localized
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.dp
+import com.usagemonitor.domain.entity.DEFAULT_RESET_REMINDER_MINUTES
+import com.usagemonitor.domain.entity.AppLanguage
+import com.usagemonitor.presentation.ui.theme.AppSpacing
+import com.usagemonitor.domain.entity.DEFAULT_QUOTA_ALERT_PERCENTS
+import com.usagemonitor.domain.entity.QuietHours
+import com.usagemonitor.domain.entity.QuotaThresholdGap
+import com.usagemonitor.domain.entity.UsageAlertSettings
+import com.usagemonitor.domain.entity.displayName
+import com.usagemonitor.domain.entity.sourcesWithQuotaThresholdGap
+
+const val ALERT_SETTINGS_QUOTA_SWITCH_TEST_TAG = "alertSettingsQuotaSwitch"
+const val ALERT_SETTINGS_QUOTA_COVERAGE_TEST_TAG = "alertSettingsQuotaCoverage"
+const val ALERT_SETTINGS_SESSION_SWITCH_TEST_TAG = "alertSettingsSessionSwitch"
+const val ALERT_SETTINGS_QUOTA_RESET_SWITCH_TEST_TAG = "alertSettingsQuotaResetSwitch"
+const val ALERT_SETTINGS_RESET_REMINDER_SWITCH_TEST_TAG = "alertSettingsResetReminderSwitch"
+const val ALERT_SETTINGS_ACCOUNT_THRESHOLDS_TEST_TAG = "alertSettingsAccountThresholds"
+const val ALERT_SETTINGS_STALLED_SWITCH_TEST_TAG = "alertSettingsStalledSwitch"
+const val ALERT_SETTINGS_STALL_THRESHOLD_TEST_TAG = "alertSettingsStallThreshold"
+const val ALERT_SETTINGS_SPIKE_SWITCH_TEST_TAG = "alertSettingsSpikeSwitch"
+const val ALERT_SETTINGS_SPIKE_FACTOR_TEST_TAG = "alertSettingsSpikeFactor"
+const val ALERT_SETTINGS_QUIET_SWITCH_TEST_TAG = "alertSettingsQuietSwitch"
+const val ALERT_SETTINGS_BUDGET_FIELD_TEST_TAG = "alertSettingsBudgetField"
+
+/** Limiares oferecidos na tela. Outros valores continuam válidos se já gravados. */
+private val OFFERED_PERCENTS = listOf(50, 75, 90, 100)
+
+/**
+ * Limiares de "sem resposta" oferecidos, em minutos.
+ *
+ * Meia hora é o piso do domain: abaixo disso o aviso alcançaria turno longo
+ * legítimo, com muitas ferramentas e subagente. Quatro horas é o teto útil — o
+ * detector ignora pendência acima de 24h de qualquer jeito.
+ */
+private val OFFERED_STALL_THRESHOLD_MINUTES = listOf(30, 60, 120, 240)
+
+/**
+ * Fatores oferecidos. Outros valores continuam válidos se já gravados.
+ *
+ * Dois é o piso útil: a variação normal entre dois dias de trabalho já chega lá
+ * sem que nada esteja errado. Cinco é para quem só quer saber do caso extremo.
+ */
+private val OFFERED_SPIKE_FACTORS = listOf(2.0, 3.0, 5.0)
+
+/** `3.0` vira `3×`: os fatores oferecidos são inteiros e a casa decimal só polui. */
+private fun spikeFactorLabel(factor: Double): String {
+    return "${factor.toInt()}×"
+}
+
+private fun stallThresholdLabel(minutes: Int): String {
+    if (minutes < 60) {
+        return "${minutes}min"
+    }
+    return "${minutes / 60}h"
+}
+
+private val DEFAULT_QUIET_HOURS = QuietHours(22, 8)
+
+/**
+ * O recorte do limiar percentual, dito na própria tela (issue #194).
+ *
+ * A aba oferecia "Avisar quando a quota cruzar um limiar" sem qualificação
+ * nenhuma, e cinco das onze fontes nunca são alcançadas — por duas mecânicas
+ * diferentes, documentadas em [QuotaThresholdGap]. Falha silenciosa é pior que
+ * funcionalidade ausente: sem esta frase, quem lê a aba acredita estar
+ * protegido nas onze.
+ *
+ * Os nomes saem de `ApiSource.displayName` e a lista de
+ * [sourcesWithQuotaThresholdGap], nunca de literais no meio do texto: renomear
+ * uma fonte deixaria a aba apontando para um card que a tela chama de outra
+ * coisa, e acrescentar uma fonte deixaria a frase incompleta em silêncio — que
+ * é exatamente o defeito que ela existe para corrigir.
+ */
+internal fun quotaThresholdCoverageNote(language: AppLanguage): String {
+    val balance = sourcesWithQuotaThresholdGap(QuotaThresholdGap.PREPAID_BALANCE)
+        .joinToString { source -> source.displayName() }
+    val observed = sourcesWithQuotaThresholdGap(QuotaThresholdGap.OBSERVED_ACTIVITY)
+        .joinToString { source -> source.displayName() }
+
+    return localized(language, "O limiar mede percentual contra o teto da cota. Saldo pré-pago não tem teto ($balance) e " +
+            "atividade observada não informa limite ($observed): nessas fontes nenhum limiar é avaliado.", "The threshold measures a percentage against the quota ceiling. Prepaid balance has no " +
+            "ceiling ($balance) and observed activity reports no limit ($observed): on those " +
+            "sources no threshold is ever evaluated.")
+}
+
+/**
+ * Cartão de alertas das Configurações.
+ *
+ * Stateless como o resto do diálogo: recebe [settings] e devolve o valor inteiro
+ * já alterado. Emitir campo a campo obrigaria quem chama a remontar o objeto e a
+ * regra de "qual campo mudou" viveria em dois lugares.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun AlertSettingsSection(
+    settings: UsageAlertSettings,
+    language: AppLanguage,
+    onSettingsChange: (UsageAlertSettings) -> Unit,
+    /** Teto mensal já formatado; vazio significa desligado. */
+    budgetText: String = "",
+    onBudgetCommit: (String) -> Unit = {},
+    modifier: Modifier = Modifier
+) {
+    val isPt = language == AppLanguage.PT
+    val selected = settings.effectiveQuotaPercents
+
+    // Um limiar gravado fora da lista oferecida (registro editado à mão, versão
+    // futura) continua visível e desmarcável. Sem esta união ele sumiria da tela
+    // e seria apagado no primeiro clique em qualquer outro chip.
+    val offered = (OFFERED_PERCENTS + selected).distinct().sorted()
+
+    // Painel com cabeçalho, como as outras seções das Configurações. O título
+    // era um `Text` solto no topo de uma coluna, e as três opções abaixo dele
+    // eram linhas sem divisória sobre o mesmo fundo.
+    AppDataSurfaceFlush(
+        modifier = modifier.fillMaxWidth(),
+        header = { AppSectionHeader(title = localized(language, "Alertas", "Alerts")) }
+    ) {
+      Column(
+        modifier = Modifier.fillMaxWidth().padding(AppSpacing.md),
+        verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
+      ) {
+        AlertToggleRow(
+            label = localized(language, "Avisar quando a quota cruzar um limiar", "Warn when a quota crosses a threshold"),
+            checked = settings.quotaAlertsEnabled,
+            testTag = ALERT_SETTINGS_QUOTA_SWITCH_TEST_TAG,
+            onCheckedChange = { checked -> onSettingsChange(settings.copy(quotaAlertsEnabled = checked)) }
+        )
+
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            offered.forEach { percent ->
+                val isSelected = percent in selected
+                // Chip de alternância: os limiares são escolha múltipla — 75 e 90
+                // podem estar ligados ao mesmo tempo —, então nem segmentado nem
+                // aba servem aqui.
+                AppToggleChip(
+                    label = "$percent%",
+                    selected = isSelected,
+                    enabled = settings.quotaAlertsEnabled,
+                    onClick = {
+                        val updated = if (isSelected) selected - percent else selected + percent
+                        onSettingsChange(settings.copy(quotaPercents = updated.sorted()))
+                    }
+                )
+            }
+        }
+
+        // Sai com o interruptor ligado e desligado: desligado, ele é justamente
+        // o que explica o que ligar o alerta não vai cobrir.
+        Text(
+            text = quotaThresholdCoverageNote(language),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.testTag(ALERT_SETTINGS_QUOTA_COVERAGE_TEST_TAG)
+        )
+
+        // #408, AA10: limiar por conta, gravado pelo `/limiar` do bot. Aqui só aparece e se desfaz.
+        if (settings.quotaPercentsByTarget.isNotEmpty()) {
+            val own = settings.quotaPercentsByTarget.values.sortedBy { override -> override.label }
+                .joinToString(" · ") { override -> override.label + " " + override.percents.joinToString(", ") { percent -> "$percent%" } }
+            Text(
+                text = (localized(language, "Limiar próprio: ", "Own threshold: ")) + own,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(ALERT_SETTINGS_ACCOUNT_THRESHOLDS_TEST_TAG)
+            )
+            AppButton(
+                label = localized(language, "Usar o geral em todas", "Use the general one everywhere"),
+                onClick = { onSettingsChange(settings.copy(quotaPercentsByTarget = emptyMap())) },
+                tone = AppButtonTone.GHOST
+            )
+        }
+
+        if (settings.quotaAlertsEnabled && selected.isEmpty()) {
+            Text(
+                text = localized(language, "Nenhum limiar escolhido: nenhum aviso de quota será emitido.", "No threshold selected: no quota warning will be sent."),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
+
+        // Logo abaixo dos limiares: responde a eles. Sem alerta de cota não há
+        // janela que tenha alertado, e o reinício não teria o que avisar.
+        AlertToggleRow(
+            label = localized(language, "Avisar quando a cota reiniciar", "Warn when a quota resets"),
+            checked = settings.quotaAlertsEnabled && settings.quotaResetAlertsEnabled,
+            testTag = ALERT_SETTINGS_QUOTA_RESET_SWITCH_TEST_TAG,
+            onCheckedChange = { checked -> onSettingsChange(settings.copy(quotaResetAlertsEnabled = checked)) }
+        )
+        Text(
+            text = localized(language, "Só das cotas que passaram de um limiar na janela anterior.", "Only for quotas that crossed a threshold in the previous window."),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        // #408, AA4: o outro lado do reinício — avisa antes, para planejar a volta.
+        val reminderMinutes = settings.resetReminderMinutes
+        AlertToggleRow(
+            label = localized(language, "Lembrar antes de a cota reiniciar", "Remind before a quota resets"),
+            checked = settings.quotaAlertsEnabled && reminderMinutes != null,
+            testTag = ALERT_SETTINGS_RESET_REMINDER_SWITCH_TEST_TAG,
+            onCheckedChange = { checked ->
+                onSettingsChange(settings.copy(resetReminderMinutes = if (checked) DEFAULT_RESET_REMINDER_MINUTES else null))
+            }
+        )
+        Text(
+            text = when {
+                isPt -> "${reminderMinutes ?: DEFAULT_RESET_REMINDER_MINUTES} min antes, só de cota acima de um limiar. No bot, /avise 30 muda os minutos."
+                else -> "${reminderMinutes ?: DEFAULT_RESET_REMINDER_MINUTES} min before, only for a quota above a threshold. In the bot, /remind 30 changes the minutes."
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        AlertToggleRow(
+            label = localized(language, "Avisar quando uma sessão CLI saturar", "Warn when a CLI session saturates"),
+            checked = settings.sessionAlertsEnabled,
+            testTag = ALERT_SETTINGS_SESSION_SWITCH_TEST_TAG,
+            onCheckedChange = { checked -> onSettingsChange(settings.copy(sessionAlertsEnabled = checked)) }
+        )
+
+        AlertToggleRow(
+            label = localized(language, "Avisar quando uma sessão CLI ficar sem resposta", "Warn when a CLI session goes unanswered"),
+            checked = settings.stalledSessionAlertsEnabled,
+            testTag = ALERT_SETTINGS_STALLED_SWITCH_TEST_TAG,
+            onCheckedChange = { checked ->
+                onSettingsChange(settings.copy(stalledSessionAlertsEnabled = checked))
+            }
+        )
+
+        if (settings.stalledSessionAlertsEnabled) {
+            // Segmentado, e não chip: o limiar é escolha única entre alternativas.
+            // Os chips logo acima respondem outra pergunta — os limiares de quota
+            // são escolha múltipla, 75 e 90 podem estar ligados ao mesmo tempo.
+            val selectedIndex = OFFERED_STALL_THRESHOLD_MINUTES
+                .indexOfFirst { minutes -> minutes * 60_000L == settings.effectiveStallThresholdMillis }
+            AppSegmentedControl(
+                options = OFFERED_STALL_THRESHOLD_MINUTES.map { minutes ->
+                    AppSegment(label = stallThresholdLabel(minutes))
+                },
+                // Valor gravado fora da lista oferecida (registro editado à mão)
+                // não pode marcar o segmento errado: sem correspondência, nenhum
+                // fica selecionado.
+                selectedIndex = selectedIndex,
+                onSelect = { index ->
+                    val minutes = OFFERED_STALL_THRESHOLD_MINUTES[index]
+                    onSettingsChange(settings.copy(stallThresholdMillis = minutes * 60_000L))
+                },
+                modifier = Modifier.testTag(ALERT_SETTINGS_STALL_THRESHOLD_TEST_TAG)
+            )
+            Text(
+                text = localized(language, "O aviso diz apenas que não houve resposta desde o último pedido — o app não " +
+                        "verifica o processo do Claude Code. Pendência acima de 24h é tratada como " +
+                        "sessão abandonada e não gera aviso.", "The warning only says there was no reply since the last request — the app does " +
+                        "not check the Claude Code process. Anything pending for over 24h counts as " +
+                        "an abandoned session and raises no warning."),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        AlertToggleRow(
+            label = localized(language, "Avisar quando o consumo do dia fugir do habitual", "Warn when the day's usage departs from the usual"),
+            checked = settings.spikeAlertsEnabled,
+            testTag = ALERT_SETTINGS_SPIKE_SWITCH_TEST_TAG,
+            onCheckedChange = { checked -> onSettingsChange(settings.copy(spikeAlertsEnabled = checked)) }
+        )
+
+        if (settings.spikeAlertsEnabled) {
+            // Segmentado pela mesma razão do limiar de "sem resposta": o fator é
+            // escolha única entre alternativas. Os chips de quota logo acima
+            // respondem outra pergunta, que aceita várias respostas ao mesmo tempo.
+            val selectedFactorIndex = OFFERED_SPIKE_FACTORS
+                .indexOfFirst { factor -> factor == settings.effectiveSpikeFactor }
+            AppSegmentedControl(
+                options = OFFERED_SPIKE_FACTORS.map { factor -> AppSegment(label = spikeFactorLabel(factor)) },
+                // Valor gravado fora da lista oferecida não pode marcar o segmento
+                // errado: sem correspondência, nenhum fica selecionado.
+                selectedIndex = selectedFactorIndex,
+                onSelect = { index ->
+                    onSettingsChange(settings.copy(spikeFactor = OFFERED_SPIKE_FACTORS[index]))
+                },
+                modifier = Modifier.testTag(ALERT_SETTINGS_SPIKE_FACTOR_TEST_TAG)
+            )
+            Text(
+                text = localized(language, "A referência é a mediana dos últimos dias, no mesmo horário — não o limite da " +
+                        "cota. Sem pelo menos três dias medidos, ou com consumo habitual perto de " +
+                        "zero, nenhum aviso é emitido.", "The reference is the median of the last few days, at the same time of day — not " +
+                        "the quota limit. With fewer than three measured days, or with usual " +
+                        "consumption near zero, no warning is sent."),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        AlertToggleRow(
+            label = localized(language, "Silenciar num período do dia", "Mute during a time range"),
+            checked = settings.quietHours != null,
+            testTag = ALERT_SETTINGS_QUIET_SWITCH_TEST_TAG,
+            onCheckedChange = { checked ->
+                onSettingsChange(settings.copy(quietHours = if (checked) DEFAULT_QUIET_HOURS else null))
+            }
+        )
+
+        val quietHours = settings.quietHours
+        if (quietHours != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                HourStepper(
+                    label = localized(language, "Das", "From"),
+                    hour = quietHours.startHour,
+                    onHourChange = { hour ->
+                        onSettingsChange(settings.copy(quietHours = quietHours.copy(startHour = hour)))
+                    }
+                )
+                HourStepper(
+                    label = localized(language, "Até", "To"),
+                    hour = quietHours.endHour,
+                    onHourChange = { hour ->
+                        onSettingsChange(settings.copy(quietHours = quietHours.copy(endHour = hour)))
+                    }
+                )
+            }
+            Text(
+                text = localized(language, "No silêncio o aviso é adiado, não descartado: ele sai quando o período terminar.", "While muted the warning is postponed, not dropped: it is sent once the range ends."),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        DebouncedTextField(
+            value = budgetText,
+            label = localized(language, "Teto mensal em USD (vazio desliga)", "Monthly cap in USD (empty disables)"),
+            onCommit = onBudgetCommit,
+            placeholder = "200",
+            validate = { text -> budgetValidationError(text, language) },
+            modifier = Modifier.fillMaxWidth().testTag(ALERT_SETTINGS_BUDGET_FIELD_TEST_TAG)
+        )
+        Text(
+            text = localized(language, "O teto mede o custo estimado das sessões CLI, em USD. Os créditos de uso da Anthropic aparecem à parte, na moeda da conta.", "The cap measures the estimated CLI session cost, in USD. Anthropic usage credits are shown separately, in the account currency."),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        if (settings.quotaPercents != DEFAULT_QUOTA_ALERT_PERCENTS) {
+            AppButton(
+                label = localized(language, "Voltar aos limiares padrão", "Restore default thresholds"),
+                onClick = { onSettingsChange(settings.copy(quotaPercents = DEFAULT_QUOTA_ALERT_PERCENTS)) },
+                tone = AppButtonTone.GHOST
+            )
+        }
+      }
+    }
+}
+
+@Composable
+private fun AlertToggleRow(
+    label: String,
+    checked: Boolean,
+    testTag: String,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    // Rótulo em mono e linha de dados, como as opções da aba Sistema: o texto
+    // estava em `bodySmall`, que é sans, e lia como frase e não como rótulo.
+    AppDataRow(showDivider = false, horizontalPadding = 0.dp) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f)
+        )
+        AppSwitch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            modifier = Modifier.testTag(testTag)
+        )
+    }
+}
+
+/** Hora inteira com passo circular: 23 + 1 volta a 0, como um relógio. */
+@Composable
+private fun HourStepper(
+    label: String,
+    hour: Int,
+    onHourChange: (Int) -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(end = 6.dp)
+        )
+        AppButton(
+            label = "−",
+            onClick = { onHourChange(wrapHour(hour - 1)) },
+            tone = AppButtonTone.GHOST
+        )
+        Text(
+            text = "${hour.toString().padStart(2, '0')}h",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        AppButton(
+            label = "+",
+            onClick = { onHourChange(wrapHour(hour + 1)) },
+            tone = AppButtonTone.GHOST
+        )
+    }
+}
+
+internal fun wrapHour(hour: Int): Int {
+    return ((hour % 24) + 24) % 24
+}
+
+/**
+ * Recusa texto que não é número, em vez de gravar zero em silêncio.
+ *
+ * Vírgula é aceita: em pt-BR é o separador decimal que a pessoa digita, e
+ * rejeitá-la seria transformar um hábito em erro.
+ */
+internal fun budgetValidationError(text: String, language: AppLanguage): String? {
+    val normalized = text.trim().replace(',', '.')
+    if (normalized.isEmpty()) {
+        return null
+    }
+    val value = normalized.toDoubleOrNull()
+    if (value == null || value < 0.0) {
+        return localized(language, "Informe um valor em dólares, ex.: 200", "Enter a dollar amount, e.g. 200")
+    }
+    return null
+}
+
+internal fun budgetValidationError(text: String, isPt: Boolean): String? =
+    budgetValidationError(text, if (isPt) AppLanguage.PT else AppLanguage.EN)

@@ -1,0 +1,650 @@
+package com.usagemonitor.presentation.ui.components
+
+import com.usagemonitor.presentation.ui.localized
+
+import com.usagemonitor.presentation.ui.CommonLabels
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ReadOnlyComposable
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
+import kotlin.math.roundToInt
+import kotlinx.datetime.DayOfWeek
+import kotlin.time.Instant
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toLocalDateTime
+import com.usagemonitor.domain.entity.anthropicProfileId
+import com.usagemonitor.domain.entity.AntigravityQuotaLabels
+import com.usagemonitor.domain.entity.ApiSource
+import com.usagemonitor.domain.entity.AppLanguage
+import com.usagemonitor.domain.entity.CodexQuotaLabels
+import com.usagemonitor.domain.entity.CursorQuotaLabels
+import com.usagemonitor.domain.entity.PeriodType
+import com.usagemonitor.domain.entity.QuotaInfo
+import com.usagemonitor.domain.entity.QuotaRiskSummary
+import com.usagemonitor.domain.entity.QuotaSeriesKey
+import com.usagemonitor.domain.entity.UsageRiskLevel
+import com.usagemonitor.domain.entity.UsageUnit
+import com.usagemonitor.domain.entity.isExtraCreditsQuota
+import com.usagemonitor.domain.entity.seriesKey
+import com.usagemonitor.domain.entity.UsageTargetKey
+import com.usagemonitor.presentation.ui.theme.AccountAccent
+import com.usagemonitor.presentation.ui.theme.AppAccents
+
+internal fun expandedQuotaTitle(quota: QuotaInfo, language: AppLanguage): String {
+    // Vem antes do periodType: a cota de créditos é REPORTED e seria rotulada
+    // como "Uso atual", que não diz nada sobre créditos.
+    if (quota.isExtraCreditsQuota) {
+        return localized(language, "Créditos de uso", "Usage credits")
+    }
+
+    if (quota.unit == UsageUnit.CURRENCY_USD) {
+        return quota.label
+    }
+
+    val periodTitle = when (quota.periodType) {
+        PeriodType.INTERVAL -> localized(language, "Sessão 5h", "5h session")
+        PeriodType.WEEKLY -> localized(language, "Semanal", "Weekly")
+        PeriodType.MONTHLY -> localized(language, "Mensal", "Monthly")
+        PeriodType.REPORTED -> CommonLabels.currentUsage(language)
+    }
+    // Duas fontes têm mais de uma cota do mesmo `periodType`: o Antigravity, um
+    // limite semanal por grupo de modelos, e o Cursor, várias franquias no mesmo
+    // ciclo. Sem o grupo, os blocos do card diriam "Semanal" ou "Mensal" todos iguais.
+    val group = AntigravityQuotaLabels.groupOf(quota.label) ?: CursorQuotaLabels.groupOf(quota.label)
+        ?: CodexQuotaLabels.groupOf(quota.label)
+    return group?.let { "$it · $periodTitle" } ?: periodTitle
+}
+
+@Composable
+internal fun cardContainerColor(): Color {
+    val scheme = MaterialTheme.colorScheme
+    return if (scheme.background.luminance() < 0.5f) {
+        scheme.surface.copy(alpha = 0.98f)
+    } else {
+        scheme.surface
+    }
+}
+
+/**
+ * Cor de identidade da fonte.
+ *
+ * [accents] é sem default de propósito: as duas telas que a usavam sem passar o
+ * tema em vigor (histórico e o card antes desta correção) davam 2,64:1 no tema
+ * claro contra os 4,5:1 exigidos — a tabela em si estava certa, o que faltava era
+ * o chamador entregar `AppAccents.current`. Sem default o compilador obriga isso
+ * em qualquer call site novo.
+ */
+internal fun accentColorFor(
+    source: ApiSource,
+    accents: AppAccents
+): Color {
+    return when (source) {
+        ApiSource.ANTHROPIC -> accents.anthropic
+        ApiSource.MINIMAX -> accents.minimax
+        ApiSource.CODEX -> accents.codex
+        ApiSource.DEEPSEEK -> accents.deepseek
+        // Go e Zen Free são planos da mesma integração e dividem o acento, como
+        // ferramentas do mesmo fornecedor compartilham identidade visual.
+        // O que separa os dois cards é o título, e a regra "cor nunca informa
+        // sozinha" já garante que isso basta.
+        ApiSource.OPENCODE, ApiSource.OPENCODE_GO -> accents.opencode
+        ApiSource.KILO -> accents.kilo
+        ApiSource.OPENROUTER -> accents.openrouter
+        ApiSource.GEMINI -> accents.gemini
+        ApiSource.CURSOR -> accents.cursor
+        ApiSource.ANTIGRAVITY -> accents.gemini
+    }
+}
+
+/**
+ * O acento de um alvo: a cor que o usuário deu à conta (issue #275) ou, sem
+ * escolha, o acento da fonte. Dono único para o card, a HUD e as Configurações —
+ * três cópias divergiriam na conta sem perfil. O mapa é por `profileId` de perfil
+ * Anthropic; conta Codex extra (issue #329) fica com o acento da fonte.
+ */
+@Composable
+@ReadOnlyComposable
+internal fun accountAccentColor(
+    targetKey: UsageTargetKey,
+    accountColors: Map<String, AccountAccent>
+): Color {
+    val chosen = targetKey.anthropicProfileId?.let { profileId -> accountColors[profileId] }
+    return chosen?.current ?: accentColorFor(source = targetKey.source, accents = AppAccents.current)
+}
+
+internal fun refreshActionLabel(isRefreshing: Boolean, language: AppLanguage): String {
+    return if (isRefreshing) {
+        localized(language, "Atualizando", "Refreshing")
+    } else {
+        localized(language, "Atualizar", "Refresh")
+    }
+}
+
+internal fun minimizeActionLabel(isMinimized: Boolean, language: AppLanguage): String {
+    if (isMinimized) {
+        return localized(language, "Expandir card", "Expand card")
+    }
+
+    return localized(language, "Minimizar card", "Minimize card")
+}
+
+internal fun cliSessionsActionLabel(language: AppLanguage): String {
+    return localized(language, "Sessões CLI desta conta", "CLI sessions for this account")
+}
+
+internal fun codexCliSessionsActionLabel(language: AppLanguage): String {
+    return localized(language, "Sessões Codex CLI desta conta", "Codex CLI sessions for this account")
+}
+
+internal fun teamUsageActionLabel(language: AppLanguage): String {
+    return localized(language, "Sessões do time nesta conta", "Team sessions in this account")
+}
+
+internal fun teamPresenceActionLabel(language: AppLanguage): String {
+    return localized(language, "Quem está conectado agora", "Who is connected now")
+}
+
+internal fun historyActionLabel(language: AppLanguage): String {
+    return localized(language, "Abrir histórico", "Open history")
+}
+
+/**
+ * Linha de reset da cota.
+ *
+ * [now] existe para o rótulo saber que a janela já venceu. Sem essa comparação
+ * um reset passado era formatado como se fosse futuro e o card repetia o valor
+ * saturado da janela anterior como se fosse o atual.
+ */
+internal fun resetLabel(quota: QuotaInfo, language: AppLanguage, now: Instant): String {
+    // Os créditos reiniciam junto com o ciclo mensal de cobrança. A resposta da
+    // Anthropic não traz a data desse reinício, então o texto não cita data — e
+    // por isso a cota também não passa pelos ramos de janela vencida abaixo.
+    if (quota.isExtraCreditsQuota) {
+        return localized(language, "Reinicia no início do mês", "Resets at the start of the month")
+    }
+
+    if (quota.unit == UsageUnit.CURRENCY_USD) {
+        return localized(language, "Saldo não expira", "Balance never expires")
+    }
+
+    // Vencida: o número na tela ainda é o da janela anterior. Dizer isso é o
+    // máximo honesto — o valor novo só chega com a próxima coleta.
+    if (quota.isExpiredAt(now)) {
+        return localized(language, "Janela reiniciada · coletando dados", "Window reset · collecting data")
+    }
+
+    if (!quota.hasKnownResetAt) {
+        return localized(language, "Janela de reset ainda não disponível", "Reset window not available yet")
+    }
+
+    val (dayFormatted, dateFormatted, timeFormatted) = formatBrtDateTimeParts(quota.periodEndAt, language)
+
+    val pt = when (quota.periodType) {
+        PeriodType.WEEKLY -> "Reinício: $dayFormatted $dateFormatted $timeFormatted BRT"
+        PeriodType.MONTHLY -> "Reinício: $dayFormatted $dateFormatted $timeFormatted BRT"
+        PeriodType.REPORTED -> "Reinício reportado: $dayFormatted $dateFormatted $timeFormatted BRT"
+        PeriodType.INTERVAL -> "Reinício: $dayFormatted $timeFormatted BRT"
+    }
+    val en = when (quota.periodType) {
+        PeriodType.WEEKLY -> "Reset: $dayFormatted $dateFormatted $timeFormatted BRT"
+        PeriodType.MONTHLY -> "Reset: $dayFormatted $dateFormatted $timeFormatted BRT"
+        PeriodType.REPORTED -> "Reported reset: $dayFormatted $dateFormatted $timeFormatted BRT"
+        PeriodType.INTERVAL -> "Reset: $dayFormatted $timeFormatted BRT"
+    }
+    return localized(language, pt, en)
+}
+
+/**
+ * O reset da cota em forma curta, para a barra HUD (issue #164).
+ *
+ * [resetLabel] é a linha do card: "Reinício: Ter 22h59 BRT" tem 23 caracteres e,
+ * numa linha de HUD que já carrega estado, nome da fonte e percentual, ela
+ * sozinha mede mais que todo o resto junto.
+ *
+ * **Não é um segundo formato de data** — sai das mesmas [formatBrtDateTimeParts]
+ * que a linha do card usa, só recortada: sem prefixo, sem fuso, e sem a data do
+ * dia quando a janela é intradiária e o reset é hoje de qualquer forma. Fuso,
+ * nome de dia e ordem de campos continuam com um dono só.
+ *
+ * Semanal e mensal levam a data **no lugar** do dia da semana (issue #474): "Qui
+ * 15h47" na mensal podia ser qualquer quinta do mês. Dia, data e hora juntos não
+ * cabem: dentro da caixa de grupo, com o glifo do anel, sobravam 33dp para o
+ * título e "Mensal" mede 43dp (`HudNotchTextFitTest`). `REPORTED` não muda.
+ *
+ * `null` é "não há reset a mostrar" — saldo que não expira, janela sem reset
+ * conhecido. Quem chama omite a coluna, em vez de imprimir um traço que não
+ * informa nada.
+ */
+internal fun resetShortLabel(quota: QuotaInfo, language: AppLanguage, now: Instant): String? {
+    if (quota.isExtraCreditsQuota) {
+        return localized(language, "mensal", "monthly")
+    }
+
+    if (quota.unit == UsageUnit.CURRENCY_USD) {
+        return null
+    }
+
+    if (quota.isExpiredAt(now)) {
+        return localized(language, "reiniciando", "resetting")
+    }
+
+    if (!quota.hasKnownResetAt) {
+        return null
+    }
+
+    val (dayFormatted, dateFormatted, timeFormatted) = formatBrtDateTimeParts(quota.periodEndAt, language)
+
+    return when (quota.periodType) {
+        PeriodType.INTERVAL -> timeFormatted
+        PeriodType.WEEKLY, PeriodType.MONTHLY -> "$dateFormatted $timeFormatted"
+        PeriodType.REPORTED -> "$dayFormatted $timeFormatted"
+    }
+}
+
+private data class BrtDateTimeParts(val day: String, val date: String, val time: String)
+
+private fun formatBrtDateTimeParts(instant: Instant, language: AppLanguage): BrtDateTimeParts {
+    val saoPauloTz = TimeZone.of("America/Sao_Paulo")
+    val local = instant.toLocalDateTime(saoPauloTz)
+    val dayFormatted = when (local.dayOfWeek) {
+        DayOfWeek.MONDAY -> localized(language, "Seg", "Mon")
+        DayOfWeek.TUESDAY -> localized(language, "Ter", "Tue")
+        DayOfWeek.WEDNESDAY -> localized(language, "Qua", "Wed")
+        DayOfWeek.THURSDAY -> localized(language, "Qui", "Thu")
+        DayOfWeek.FRIDAY -> localized(language, "Sex", "Fri")
+        DayOfWeek.SATURDAY -> localized(language, "Sáb", "Sat")
+        DayOfWeek.SUNDAY -> localized(language, "Dom", "Sun")
+    }
+    val dateFormatted = localized(language, "${local.date.dayOfMonth.toString().padStart(2, '0')}/${local.date.monthNumber.toString().padStart(2, '0')}", "${local.date.monthNumber.toString().padStart(2, '0')}/${local.date.dayOfMonth.toString().padStart(2, '0')}")
+    val timeFormatted = localized(language, "${local.hour}h${local.minute.toString().padStart(2, '0')}", "${local.hour}:${local.minute.toString().padStart(2, '0')}")
+    return BrtDateTimeParts(dayFormatted, dateFormatted, timeFormatted)
+}
+
+/** Formata um instante em BRT (America/Sao_Paulo) como "Seg 11/08 14h32" / "Mon 08/11 14:32". */
+internal fun formatBrtDateTime(instant: Instant, language: AppLanguage): String {
+    val parts = formatBrtDateTimeParts(instant, language)
+    return "${parts.day} ${parts.date} ${parts.time}"
+}
+
+/**
+ * Cor do semáforo de risco.
+ *
+ * Passou a sair de [AppTone] em vez de três literais. Os antigos `0xFFFFC107` e
+ * `0xFFF44336` nunca foram medidos contra as superfícies dos dois temas — o
+ * amarelo dava menos de 3:1 sobre a superfície clara —, e o verde já era, por
+ * coincidência, o mesmo `cacheRead` da paleta. Um dono só para a semântica de
+ * cor, e o `AppAccentsContrastTest` a cobre.
+ */
+@Composable
+@ReadOnlyComposable
+internal fun colorFor(level: UsageRiskLevel): Color {
+    return toneFor(level).color()
+}
+
+/**
+ * O pior risco entre as cotas de um card, para o badge do cabeçalho.
+ *
+ * "Pior" é o maior [UsageRiskLevel.ordinal]: a ordem do enum vai de `ON_TRACK`
+ * a `WILL_EXCEED`, e é ela que decide — comparar por percentual daria outra
+ * resposta, porque 40% às onze da manhã pode ser pior que 80% dez minutos antes
+ * do reinício.
+ *
+ * Cota **vencida** não entra: a janela dela descreve um período que já não
+ * existe, e a projeção sobre ele diria respeito a nada. É a mesma exclusão que
+ * `evaluateUsageAlerts` faz antes de notificar.
+ *
+ * Devolve `null` quando nenhuma cota do card tem projeção conhecida — sem risco
+ * calculado não há estado a afirmar, e um badge "Normal" ali seria uma garantia
+ * que ninguém deu.
+ */
+internal fun worstQuotaRisk(
+    quotas: List<QuotaInfo>,
+    riskByQuotaKey: Map<QuotaSeriesKey, QuotaRiskSummary>,
+    now: Instant
+): Pair<QuotaInfo, QuotaRiskSummary>? {
+    if (riskByQuotaKey.isEmpty()) {
+        return null
+    }
+    return quotas
+        .asSequence()
+        .filterNot { quota -> quota.isExpiredAt(now) }
+        .mapNotNull { quota -> riskByQuotaKey[quota.seriesKey]?.let { risk -> quota to risk } }
+        .maxByOrNull { (_, risk) -> risk.level.ordinal }
+}
+
+internal fun toneFor(level: UsageRiskLevel): AppTone {
+    return when (level) {
+        UsageRiskLevel.ON_TRACK -> AppTone.OK
+        UsageRiskLevel.AT_RISK -> AppTone.WARNING
+        UsageRiskLevel.WILL_EXCEED -> AppTone.CRITICAL
+    }
+}
+
+internal fun riskLevelLabel(level: UsageRiskLevel, language: AppLanguage): String {
+    val pt = when (level) {
+        UsageRiskLevel.ON_TRACK -> "Normal"
+        UsageRiskLevel.AT_RISK -> "Atenção"
+        UsageRiskLevel.WILL_EXCEED -> "Crítico"
+    }
+    val en = when (level) {
+        UsageRiskLevel.ON_TRACK -> "Normal"
+        UsageRiskLevel.AT_RISK -> "Warning"
+        UsageRiskLevel.WILL_EXCEED -> "Critical"
+    }
+    return localized(language, pt, en)
+}
+
+internal fun riskDotContentDescription(risk: QuotaRiskSummary, quotaLabel: String, language: AppLanguage): String {
+    val levelLabel = riskLevelLabel(risk.level, language)
+    return localized(language, "Risco de estouro $quotaLabel: $levelLabel", "Overage risk $quotaLabel: $levelLabel")
+}
+
+internal fun riskDotTooltipTitle(language: AppLanguage): String {
+    return localized(language, "Projeção de uso", "Usage projection")
+}
+
+/**
+ * A frase que explica o nível de risco.
+ *
+ * Ela falava em "reset" nos dois ramos, e para um saldo pré-pago isso é uma
+ * afirmação falsa: o card imprime "Saldo não expira" na linha de cima e a
+ * tooltip prometia um reset logo abaixo (issue #109). Sem reset a frase é sobre
+ * quando os créditos acabam, que é a única coisa que o consumo permite prever.
+ */
+internal fun riskDotTooltipSubtitle(risk: QuotaRiskSummary, language: AppLanguage): String {
+    val exhaustionAt = risk.estimatedExhaustionAt
+
+    if (!risk.hasKnownResetAt) {
+        // Saldo sem previsão é saldo parado: sem consumo observado não há data a
+        // dar, e prometer uma seria inventar.
+        if (exhaustionAt == null) {
+            return localized(language, "Sem consumo observado no período — não há previsão de término.", "No usage observed in the period — no depletion estimate.")
+        }
+        val formattedInstant = formatBrtDateTime(exhaustionAt, language)
+        return localized(language, "No ritmo atual, os créditos devem acabar em $formattedInstant BRT.", "At the current pace, the credits should run out on $formattedInstant BRT.")
+    }
+
+    return if (exhaustionAt == null) {
+        localized(language, "No ritmo atual, a cota deve resetar antes de esgotar.", "At the current pace, the quota should reset before running out.")
+    } else {
+        val formattedInstant = formatBrtDateTime(exhaustionAt, language)
+        localized(language, "No ritmo atual, a cota deve esgotar antes do reset — previsão: $formattedInstant BRT.", "At the current pace, the quota should run out before reset — estimated: $formattedInstant BRT.")
+    }
+}
+
+internal fun riskStatusContentDescription(
+    quotaLabel: String,
+    risk: QuotaRiskSummary,
+    language: AppLanguage
+): String {
+    val levelLabel = riskLevelLabel(risk.level, language)
+    val explanation = riskDotTooltipSubtitle(risk, language)
+    return localized(language, "Status $levelLabel. Cota $quotaLabel. $explanation", "Status $levelLabel. Quota $quotaLabel. $explanation")
+}
+
+internal fun buildQuotaTooltipMetrics(
+    quota: QuotaInfo,
+    language: AppLanguage,
+    now: Instant,
+    risk: QuotaRiskSummary? = null
+): List<TooltipMetric> {
+    val metrics = mutableListOf<TooltipMetric>()
+
+    if (quota.isExtraCreditsQuota) {
+        metrics += TooltipMetric(
+            label = localized(language, "Créditos usados", "Credits used"),
+            value = formatCurrencyAmount(quota.rawUsed, quota.currencyCode)
+        )
+        metrics += TooltipMetric(
+            label = localized(language, "Limite mensal", "Monthly limit"),
+            value = formatCurrencyAmount(quota.rawTotal, quota.currencyCode)
+        )
+        metrics += TooltipMetric(
+            label = localized(language, "Percentual", "Percentage"),
+            value = "${quota.used}%"
+        )
+        metrics += resetOrBlockTooltipMetric(quota = quota, language = language, now = now)
+        metrics.addProjectionMetric(risk = risk, language = language)
+        return metrics
+    }
+
+    if (quota.unit == UsageUnit.CURRENCY_USD) {
+        metrics += TooltipMetric(
+            label = CommonLabels.currentBalance(language),
+            value = formatCurrencyAmount(quota.total, quota.currencyCode)
+        )
+        metrics += TooltipMetric(
+            label = localized(language, "Status", "Status"),
+            value = resetLabel(quota = quota, language = language, now = now)
+        )
+        metrics.addProjectionMetric(risk = risk, language = language)
+        return metrics
+    }
+
+    metrics += TooltipMetric(
+        label = CommonLabels.currentUsage(language),
+        value = quotaTooltipUsageValue(quota = quota, language = language)
+    )
+
+    if (quota.total > 0L) {
+        metrics += TooltipMetric(
+            label = localized(language, "Restante", "Remaining"),
+            value = quotaTooltipRemainingValue(quota = quota)
+        )
+        metrics += TooltipMetric(
+            label = localized(language, "Percentual", "Percentage"),
+            value = "${(quota.percentageUsed * 100).roundToInt()}%"
+        )
+    }
+
+    metrics += resetOrBlockTooltipMetric(quota = quota, language = language, now = now)
+    metrics.addElapsedWindowMetric(quota = quota, language = language, now = now)
+    metrics.addProjectionMetric(risk = risk, language = language)
+    return metrics
+}
+
+/** Linha de reinício da tooltip; cota bloqueada (#567) mostra o motivo no lugar dela. */
+internal fun resetOrBlockTooltipMetric(quota: QuotaInfo, language: AppLanguage, now: Instant): TooltipMetric {
+    val reason = quota.blockReason
+    if (reason != null) {
+        return TooltipMetric(
+            label = quotaBlockTooltipLabel(language),
+            value = quotaBlockReasonLabel(reason = reason, language = language)
+        )
+    }
+    return TooltipMetric(
+        label = "Reset",
+        value = resetLabel(quota = quota, language = language, now = now)
+    )
+}
+
+internal fun quotaTooltipUsageValue(quota: QuotaInfo, language: AppLanguage): String {
+    return when (quota.unit) {
+        UsageUnit.CURRENCY_USD -> formatCurrencyAmount(quota.total, quota.currencyCode)
+        UsageUnit.PERCENTAGE -> {
+            if (quota.total > 0L) {
+                "${quota.used}/${quota.total} %"
+            } else {
+                "${quota.used} %"
+            }
+        }
+        UsageUnit.REQUESTS -> {
+            if (quota.total > 0L) {
+                "${quota.used}/${quota.total} req"
+            } else localized(language, "${quota.used} req", "${quota.used} req")
+        }
+        UsageUnit.TOKENS -> {
+            if (quota.total > 0L) {
+                "${quota.used}/${quota.total} tok"
+            } else {
+                "${quota.used} tok"
+            }
+        }
+    }
+}
+
+internal fun quotaTooltipRemainingValue(quota: QuotaInfo): String {
+    return when (quota.unit) {
+        UsageUnit.REQUESTS -> "${quota.remaining} req"
+        UsageUnit.TOKENS -> "${quota.remaining} tok"
+        UsageUnit.PERCENTAGE -> "${quota.remaining} %"
+        UsageUnit.CURRENCY_USD -> formatCurrencyAmount(quota.remaining, quota.currencyCode)
+    }
+}
+
+/**
+ * Símbolo da moeda. Códigos sem símbolo conhecido caem no próprio código, para
+ * nunca exibir um valor em BRL com cifrão de dólar.
+ */
+internal fun currencySymbol(currencyCode: String): String {
+    return when (currencyCode.uppercase()) {
+        "USD" -> "$"
+        "BRL" -> "R$"
+        "EUR" -> "€"
+        "GBP" -> "£"
+        else -> "${currencyCode.uppercase()} "
+    }
+}
+
+// Assume duas casas decimais (`exponent`/`decimal_places` = 2 nas moedas que as
+// fontes atuais devolvem). Moeda com outro expoente exigiria propagá-lo.
+internal fun formatCurrencyAmount(cents: Long, currencyCode: String = "USD"): String {
+    val sign = if (cents < 0L) "-" else ""
+    val absoluteCents = kotlin.math.abs(cents)
+    val units = absoluteCents / 100
+    val remainder = absoluteCents % 100
+    return "$sign${currencySymbol(currencyCode)}${units}.${remainder.toString().padStart(2, '0')}"
+}
+
+/**
+ * O percentual exibido de uma cota.
+ *
+ * **Truncado, não arredondado**, e é a regra que o resto do app já seguia: o
+ * arco fazia `toInt()` e os alertas da bandeja tratam o limiar como piso — 89,9%
+ * não cruzou 90%. Só esta função arredondava, então o mesmo card mostrava 26% na
+ * cota expandida e 27% no badge minimizado, para o mesmo 12 de 45.
+ */
+internal fun compactPercentageLabel(quota: QuotaInfo): String {
+    return when (quota.unit) {
+        UsageUnit.CURRENCY_USD -> formatCents(quota.total, quota.currencyCode)
+        UsageUnit.PERCENTAGE -> "${quota.used}%"
+        else -> "${(quota.percentageUsed * 100).toInt()}%"
+    }
+}
+
+/**
+ * O rótulo da cota encurtado para a linha parada da barra HUD.
+ *
+ * É a **última palavra** do rótulo: "Claude 5h" → "5h", "Go semanal" →
+ * "semanal", "Saldo" → "Saldo". A linha parada mostra uma fonte só, então o
+ * prefixo que distingue fornecedores ("Claude", "Go", "Codex") já está dito
+ * pelo nome da conta ao lado — repeti-lo em cada cota gastaria a largura que a
+ * própria conta precisa.
+ *
+ * Regra deliberadamente burra: fora do Antigravity, nenhuma fonte tem duas cotas
+ * terminando na mesma palavra, e inventar um mapa de abreviações seria um segundo
+ * dono dos nomes de cota. O Antigravity é resolvido por [AntigravityQuotaLabels],
+ * que já é o dono dos rótulos dele.
+ */
+internal fun hudQuotaShortLabel(label: String): String {
+    // Exceção única à regra: o Antigravity tem duas cotas "7d" na mesma fonte, e a
+    // última palavra sozinha diria "7d 4% · 7d 0%". O grupo fica.
+    AntigravityQuotaLabels.withoutSource(label)?.let { return it }
+    return label.substringAfterLast(' ')
+}
+
+/**
+ * `5h 88%` — o rótulo curto de uma cota e o percentual dela, para a linha do HUD.
+ *
+ * Existe porque a linha precisa dizer 5h **e** 7d: com um número só, quem olha
+ * não sabe qual das duas janelas está vendo. O percentual sai de
+ * [compactPercentageLabel], o mesmo do card — nenhum formato novo.
+ */
+internal fun hudQuotaChipText(quota: QuotaInfo): String {
+    return "${hudQuotaShortLabel(quota.label)} ${compactPercentageLabel(quota)}"
+}
+
+internal fun formatUsage(quota: QuotaInfo): String {
+    if (quota.isExtraCreditsQuota) {
+        return formatCreditsUsage(quota)
+    }
+
+    return when (quota.unit) {
+        UsageUnit.PERCENTAGE -> "${quota.used}%"
+        UsageUnit.CURRENCY_USD -> formatCents(quota.total, quota.currencyCode)
+        UsageUnit.TOKENS -> {
+            val displayUsed = if (quota.rawUsed > 0L) quota.rawUsed else quota.used
+            val displayTotal = if (quota.rawTotal > 0L) quota.rawTotal else quota.total
+            "${abbreviate(displayUsed)}/${abbreviate(displayTotal)} tok"
+        }
+        UsageUnit.REQUESTS -> "${abbreviate(quota.used)}/${abbreviate(quota.total)} req"
+    }
+}
+
+/** Créditos consumidos sobre o limite mensal, na moeda da conta. */
+internal fun formatCreditsUsage(quota: QuotaInfo): String {
+    val used = formatCents(quota.rawUsed, quota.currencyCode)
+    val total = formatCents(quota.rawTotal, quota.currencyCode)
+    return "$used/$total"
+}
+
+/**
+ * Texto da linha de detalhe da cota, ou nulo quando não há detalhe a exibir.
+ *
+ * Os créditos ignoram [showUsageDetails]: o interruptor existe para esconder as
+ * estimativas de tokens da Anthropic, e os valores de crédito vêm prontos da API.
+ */
+internal fun quotaDetailText(quota: QuotaInfo, showUsageDetails: Boolean): String? {
+    if (quota.isExtraCreditsQuota) {
+        return formatCreditsUsage(quota)
+    }
+
+    if (!showUsageDetails) {
+        return null
+    }
+
+    if (quota.unit == UsageUnit.PERCENTAGE || quota.unit == UsageUnit.CURRENCY_USD) {
+        return null
+    }
+
+    return formatUsage(quota)
+}
+
+/**
+ * Ordem de exibição das cotas no card.
+ *
+ * Os créditos entram sempre por último: são leitura acessória e a posição não
+ * pode sair do `periodType`, que os colocaria à frente das janelas de uso.
+ */
+internal fun orderQuotasForCard(quotas: List<QuotaInfo>): List<QuotaInfo> {
+    val creditsQuota = quotas.firstOrNull { quota -> quota.isExtraCreditsQuota }
+    val windowQuotas = quotas.filterNot { quota -> quota.isExtraCreditsQuota }
+
+    return buildList {
+        windowQuotas.firstOrNull { quota -> quota.periodType == PeriodType.REPORTED }?.let(::add)
+        windowQuotas.firstOrNull { quota -> quota.periodType == PeriodType.INTERVAL }?.let(::add)
+        windowQuotas.firstOrNull { quota -> quota.periodType == PeriodType.WEEKLY }?.let(::add)
+        windowQuotas.firstOrNull { quota -> quota.periodType == PeriodType.MONTHLY }?.let(::add)
+        windowQuotas.filterNot { quota -> quota in this }.forEach(::add)
+        if (creditsQuota != null) {
+            add(creditsQuota)
+        }
+    }
+}
+
+internal fun formatCents(cents: Long, currencyCode: String = "USD"): String {
+    val units = cents / 100
+    val remainder = cents % 100
+    return "${currencySymbol(currencyCode)}${units}.${remainder.toString().padStart(2, '0')}"
+}
+
+internal fun abbreviate(n: Long): String {
+    return when {
+        n >= 1_000_000L -> "${removeDecimal("%.1f".format(n / 1_000_000f))}M"
+        n >= 1_000L -> "${removeDecimal("%.1f".format(n / 1_000f))}K"
+        else -> n.toString()
+    }
+}
+
+internal fun removeDecimal(value: String): String = value.replace(",0", "").replace(".0", "")

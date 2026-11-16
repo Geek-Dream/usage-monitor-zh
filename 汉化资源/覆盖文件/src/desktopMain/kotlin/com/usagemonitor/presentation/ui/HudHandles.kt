@@ -1,0 +1,348 @@
+package com.usagemonitor.presentation.ui
+
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.PushPin as PushPinOutlined
+import androidx.compose.material.icons.rounded.PanTool
+import androidx.compose.material.icons.rounded.PushPin
+import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.unit.dp
+import com.usagemonitor.HUD_HANDLE_SIZE
+import com.usagemonitor.HudEdge
+import com.usagemonitor.domain.entity.AppLanguage
+import com.usagemonitor.presentation.ui.components.AppTone
+import com.usagemonitor.presentation.ui.components.appDepth
+import com.usagemonitor.presentation.ui.components.color
+import com.usagemonitor.presentation.ui.theme.AppDepth
+import com.usagemonitor.presentation.ui.theme.AppMotion
+import com.usagemonitor.presentation.ui.theme.AppSurfaceLadders
+import com.usagemonitor.presentation.ui.theme.appSpring
+import com.usagemonitor.presentation.ui.theme.appTween
+import java.awt.Cursor
+import kotlin.math.atan2
+
+internal const val HUD_MOVE_HANDLE_TAG = "hudMoveHandle"
+internal const val HUD_GEAR_HANDLE_TAG = "hudGearHandle"
+internal const val HUD_RETRACT_HANDLE_TAG = "hudRetractHandle"
+
+/** O ponto da atualização pendente na engrenagem aberta (issue #291). */
+internal const val HUD_GEAR_UPDATE_DOT_TAG = "hudGearUpdateDot"
+
+/** O arco de dica da engrenagem tingido pela atualização pendente, com o notch parado. */
+internal const val HUD_GEAR_HINT_UPDATE_TAG = "hudGearHintUpdate"
+
+internal fun hudMoveHandleDescription(language: AppLanguage): String =
+    localized(language, "Mover a barra HUD", "Move the HUD bar")
+
+/**
+ * A alça de mover: pressionar e arrastar leva o notch a qualquer borda. É a
+ * resposta à pergunta "como eu movo?" — o cursor de mover sobre o notch inteiro
+ * existia, e ninguém o descobria. Uma mão e não setas, como no Codenotch: o
+ * gesto é carregar, não empurrar.
+ *
+ * É o **único** jeito de mover: o corpo do notch usa o mesmo [hudPressGesture]
+ * sem arrasto, e a mão o usa com o clique vazio — é o host quem lê o ponteiro na
+ * tela. Carregando, o disco ganha a borda de informação — está na mão, não
+ * oferecido.
+ */
+@Composable
+internal fun HudMoveHandle(
+    language: AppLanguage,
+    carrying: Boolean,
+    onDragStart: () -> Unit,
+    onDragMove: () -> Unit,
+    onDragEnd: () -> Unit,
+    interaction: MutableInteractionSource,
+    modifier: Modifier = Modifier
+) {
+    val description = hudMoveHandleDescription(language)
+    HudHandleDisc(
+        carrying = carrying,
+        interaction = interaction,
+        modifier = modifier
+            .testTag(HUD_MOVE_HANDLE_TAG)
+            .pointerHoverIcon(PointerIcon(Cursor(Cursor.MOVE_CURSOR)))
+            .hudPressGesture(
+                onDragStart = onDragStart,
+                onDragMove = onDragMove,
+                onDragEnd = onDragEnd,
+                onClick = {}
+            )
+            .semantics { contentDescription = description }
+    ) { tint ->
+        Icon(Icons.Rounded.PanTool, contentDescription = null, tint = tint, modifier = Modifier.size(HANDLE_ICON_SIZE))
+    }
+}
+
+/** O que o clique no alfinete faz: a ação, não o estado (#400). */
+internal fun hudRetractHandleDescription(autoRetract: Boolean, language: AppLanguage): String = when {
+    language == AppLanguage.PT && autoRetract -> "Manter a barra HUD aberta"
+    language == AppLanguage.PT -> "Recolher a barra HUD quando parada"
+    autoRetract -> "Keep the HUD bar open"
+    else -> "Retract the HUD bar when idle"
+}
+
+/** O estado do modo, para o leitor de tela: o ícone cheio ou vazado não diz sozinho. */
+internal fun hudRetractHandleState(autoRetract: Boolean, language: AppLanguage): String = when {
+    language == AppLanguage.PT && autoRetract -> "Recolhe quando parada"
+    language == AppLanguage.PT -> "Sempre aberta"
+    autoRetract -> "Retracts when idle"
+    else -> "Always open"
+}
+
+/**
+ * O alfinete ao lado da mão (issue #400): liga e desliga o modo "recolher quando
+ * parada". Alfinete cheio é a barra **presa aberta** (o modo de sempre);
+ * vazado, solta — recolhe à faixa quando o ponteiro sai. A descrição diz a
+ * ação, e o estado vai à parte.
+ */
+@Composable
+internal fun HudRetractHandle(
+    autoRetract: Boolean,
+    language: AppLanguage,
+    onClick: () -> Unit,
+    interaction: MutableInteractionSource,
+    modifier: Modifier = Modifier
+) {
+    val description = hudRetractHandleDescription(autoRetract, language)
+    val state = hudRetractHandleState(autoRetract, language)
+    HudHandleDisc(
+        carrying = false,
+        interaction = interaction,
+        modifier = modifier
+            .testTag(HUD_RETRACT_HANDLE_TAG)
+            .pointerHoverIcon(PointerIcon(Cursor(Cursor.HAND_CURSOR)))
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                role = Role.Button,
+                onClickLabel = description,
+                onClick = onClick
+            )
+            .semantics {
+                contentDescription = description
+                stateDescription = state
+            }
+    ) { tint ->
+        Icon(
+            if (autoRetract) Icons.Outlined.PushPinOutlined else Icons.Rounded.PushPin,
+            contentDescription = null,
+            tint = tint,
+            modifier = Modifier.size(HANDLE_ICON_SIZE)
+        )
+    }
+}
+
+/**
+ * A engrenagem na outra ponta: o ponteiro em cima abre o que ela oferece
+ * (#317), e o clique também.
+ *
+ * Com [badgeTone], um ponto no canto de cima — a atualização pendente (issue
+ * #291). Ele substitui o ícone de celular com seta que ficava na faixa de anéis,
+ * que em 12dp não dizia "versão nova" a ninguém: o ponto não tenta dizer o quê,
+ * só que a engrenagem tem algo a mostrar, e o balão dela mostra. O ponto fica
+ * fora do recorte circular do disco, no canto da caixa quadrada da alça, e a
+ * frase vai em [description] — cor nunca informa sozinha.
+ */
+@Composable
+internal fun HudGearHandle(
+    description: String,
+    onClick: () -> Unit,
+    interaction: MutableInteractionSource,
+    modifier: Modifier = Modifier,
+    badgeTone: AppTone? = null
+) {
+    Box(modifier = modifier.requiredSize(HUD_HANDLE_SIZE)) {
+        HudHandleDisc(
+            carrying = false,
+            interaction = interaction,
+            modifier = Modifier
+                .testTag(HUD_GEAR_HANDLE_TAG)
+                .pointerHoverIcon(PointerIcon(Cursor(Cursor.HAND_CURSOR)))
+                .clickable(
+                    interactionSource = interaction,
+                    indication = null,
+                    role = Role.Button,
+                    onClickLabel = description,
+                    onClick = onClick
+                )
+                .semantics { contentDescription = description }
+        ) { tint ->
+            Icon(Icons.Rounded.Settings, contentDescription = null, tint = tint, modifier = Modifier.size(HANDLE_ICON_SIZE))
+        }
+        if (badgeTone != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .size(BADGE_DOT_SIZE)
+                    .testTag(HUD_GEAR_UPDATE_DOT_TAG)
+                    .clip(CircleShape)
+                    // O anel da superfície separa o ponto do disco e do que estiver
+                    // atrás da janela transparente.
+                    .background(MaterialTheme.colorScheme.surface)
+                    .padding(BADGE_DOT_RING)
+                    .clip(CircleShape)
+                    .background(badgeTone.color())
+            )
+        }
+    }
+}
+
+/** O disco das duas alças: superfície em `RAISED`, hover que acende o glifo e pressão que encolhe. */
+@Composable
+private fun HudHandleDisc(
+    carrying: Boolean,
+    modifier: Modifier,
+    interaction: MutableInteractionSource,
+    glyph: @Composable (androidx.compose.ui.graphics.Color) -> Unit
+) {
+    val hovered by interaction.collectIsHoveredAsState()
+    val pressed by interaction.collectIsPressedAsState()
+    val ladder = AppSurfaceLadders.current
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) PRESSED_SCALE else 1f,
+        animationSpec = appSpring(AppMotion.Springs.SNAPPY),
+        label = "hudHandleScale"
+    )
+    val tint by animateColorAsState(
+        targetValue = if (hovered || carrying) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+        animationSpec = appTween(AppMotion.fast),
+        label = "hudHandleTint"
+    )
+    val border = if (carrying) AppTone.INFO.color() else ladder.borderTop
+    Box(
+        modifier = modifier
+            .requiredSize(HUD_HANDLE_SIZE)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .appDepth(AppDepth.RAISED, CircleShape)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.surface)
+            .border(if (carrying) 2.dp else 1.dp, border, CircleShape)
+            .hoverable(interaction),
+        contentAlignment = Alignment.Center
+    ) {
+        glyph(tint)
+    }
+}
+
+/**
+ * Parado, cada alça é só um arco de um quarto na margem da sombra, rente à borda
+ * da tela e concêntrico com o canto do notch — o `h-rest` do Codenotch. Diz que
+ * há algo ali sem ocupar área de clique: a janela recolhida já tem essa margem.
+ *
+ * [atStart] é a ponta de perto (a da mão). O arco sai da borda da tela e vai até
+ * o lado de fora do notch.
+ */
+@Composable
+internal fun HudHandleHint(
+    edge: HudEdge,
+    atStart: Boolean,
+    modifier: Modifier = Modifier,
+    /**
+     * A atualização pendente (issue #291), só na ponta da engrenagem: o arco toma
+     * o tom do estado e ganha um ponto no meio. Parado, este arco é tudo o que se
+     * vê da engrenagem, e sem ele o aviso só existiria com o notch aberto.
+     */
+    accent: Color? = null
+) {
+    // `outline` e não a borda de luz do notch: o arco fica sobre o que estiver
+    // atrás da janela, e a luz de 1dp some contra papel de parede escuro.
+    val color = accent ?: MaterialTheme.colorScheme.outline
+    val tagged = if (accent != null) modifier.testTag(HUD_GEAR_HINT_UPDATE_TAG) else modifier
+    Canvas(modifier = tagged.requiredSize(HUD_HANDLE_HINT_SIZE)) {
+        val side = size.width
+        // O canto do arco: onde o notch encontra a borda da tela, do lado da alça.
+        val alongCorner = if (atStart) side else 0f
+        val corner = mapAlongAcross(edge, alongCorner, 0f, size)
+        val inward = mapAlongAcross(edge, alongCorner, side, size) - corner
+        val away = mapAlongAcross(edge, if (atStart) 0f else side, 0f, size) - corner
+        val start = angleOf(inward)
+        var sweep = angleOf(away) - start
+        while (sweep > 180f) sweep -= 360f
+        while (sweep < -180f) sweep += 360f
+        val radius = side * HINT_RADIUS_FRACTION
+        val stroke = HINT_STROKE.toPx()
+        drawArc(
+            color = color,
+            startAngle = start,
+            sweepAngle = sweep,
+            useCenter = false,
+            topLeft = Offset(corner.x - radius, corner.y - radius),
+            size = Size(radius * 2, radius * 2),
+            style = Stroke(width = stroke, cap = StrokeCap.Round)
+        )
+        if (accent != null) {
+            val middle = Math.toRadians((start + sweep / 2f).toDouble())
+            drawCircle(
+                color = accent,
+                radius = HINT_DOT_RADIUS.toPx(),
+                center = Offset(
+                    x = corner.x + radius * kotlin.math.cos(middle).toFloat(),
+                    y = corner.y + radius * kotlin.math.sin(middle).toFloat()
+                )
+            )
+        }
+    }
+}
+
+/** (ao longo, a partir da borda da tela) → coordenadas da caixa de cada borda. */
+private fun mapAlongAcross(edge: HudEdge, along: Float, across: Float, size: Size): Offset = when (edge) {
+    HudEdge.TOP -> Offset(along, across)
+    HudEdge.BOTTOM -> Offset(along, size.height - across)
+    HudEdge.LEFT -> Offset(across, along)
+    HudEdge.RIGHT -> Offset(size.width - across, along)
+}
+
+private fun angleOf(vector: Offset): Float = Math.toDegrees(atan2(vector.y, vector.x).toDouble()).toFloat()
+
+/** Cabe na margem de 16dp da sombra, que a janela recolhida já tem em cada ponta. */
+internal val HUD_HANDLE_HINT_SIZE = 14.dp
+private val HINT_STROKE = 3.dp
+private const val HINT_RADIUS_FRACTION = 0.7f
+private val HANDLE_ICON_SIZE = 16.dp
+
+/** O ponto sobre o arco parado: cabe na caixa de 14dp em qualquer ângulo. */
+private val HINT_DOT_RADIUS = 2.5.dp
+
+/** O ponto da engrenagem aberta e o anel de superfície em volta dele. */
+private val BADGE_DOT_SIZE = 8.dp
+private val BADGE_DOT_RING = 1.5.dp
+private const val PRESSED_SCALE = 0.9f

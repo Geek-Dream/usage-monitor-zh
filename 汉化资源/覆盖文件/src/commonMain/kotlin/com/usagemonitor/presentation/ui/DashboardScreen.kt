@@ -1,0 +1,566 @@
+package com.usagemonitor.presentation.ui
+
+import com.usagemonitor.presentation.ui.components.rememberLatestNonNull
+import com.usagemonitor.presentation.ui.components.AppExpandable
+import com.usagemonitor.presentation.ui.components.AppStateCrossfade
+import androidx.compose.foundation.VerticalScrollbar
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.rememberScrollbarAdapter
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlin.time.Clock
+import kotlin.time.Instant
+import com.usagemonitor.domain.entity.ApiSource
+import com.usagemonitor.domain.entity.ApiUsageStats
+import com.usagemonitor.domain.entity.AppLanguage
+import com.usagemonitor.domain.entity.QuotaRiskSummary
+import com.usagemonitor.domain.entity.QuotaSeriesKey
+import com.usagemonitor.domain.entity.SessionPulse
+import com.usagemonitor.domain.entity.UsageAccountKey
+import com.usagemonitor.domain.entity.UsageTargetKey
+import com.usagemonitor.presentation.ui.components.AppButton
+import com.usagemonitor.presentation.ui.components.AppButtonTone
+import com.usagemonitor.presentation.ui.components.AppErrorState
+import com.usagemonitor.presentation.ui.components.AppLoadingState
+import com.usagemonitor.presentation.ui.components.FooterBar
+import com.usagemonitor.presentation.ui.components.PersistentApiWarningBanner
+import com.usagemonitor.presentation.ui.components.RefreshWarningDialog
+import com.usagemonitor.presentation.ui.components.ResponsiveDashboardCardGrid
+import com.usagemonitor.presentation.ui.theme.AccountAccent
+import com.usagemonitor.presentation.ui.theme.AccountEmoji
+import com.usagemonitor.presentation.ui.theme.AppSpacing
+import com.usagemonitor.presentation.viewmodel.DashboardViewModel
+import com.usagemonitor.presentation.viewmodel.UiApiError
+import com.usagemonitor.presentation.viewmodel.UiState
+
+/**
+ * Folga somada à espera para o relógio já ter cruzado o `periodEndAt` ao acordar.
+ * O reset da fonte não é instantâneo; acordar no milissegundo exato não ajuda.
+ */
+private const val QUOTA_EXPIRY_MARGIN_MILLIS = 1_000L
+
+/** Mesmo texto de reserva das demais falhas assíncronas sem mensagem própria. */
+private const val UNKNOWN_ERROR_MESSAGE = "erro desconhecido"
+
+/**
+ * Próximo `periodEndAt` ainda no futuro entre as cotas na tela.
+ *
+ * Cotas sem reset conhecido ficam de fora: o `periodEndAt` delas é o sentinela
+ * distante que o mapper usa na ausência de `resets_at`.
+ */
+private fun nextQuotaExpiry(stats: List<ApiUsageStats>, now: Instant): Instant? {
+    var earliest: Instant? = null
+    for (item in stats) {
+        for (quota in item.quotas) {
+            if (!quota.hasKnownResetAt || quota.periodEndAt <= now) {
+                continue
+            }
+            val currentEarliest = earliest
+            if (currentEarliest == null || quota.periodEndAt < currentEarliest) {
+                earliest = quota.periodEndAt
+            }
+        }
+    }
+    return earliest
+}
+
+@Composable
+fun DashboardScreen(
+    viewModel: DashboardViewModel,
+    appVersion: String,
+    language: AppLanguage,
+    cardOrder: List<UsageTargetKey>,
+    minimizedCards: Set<UsageTargetKey>,
+    onMoveCardToIndex: (UsageTargetKey, Int) -> Unit,
+    onToggleCardMinimized: (UsageTargetKey) -> Unit,
+    onOpenHistory: (ApiSource, UsageAccountKey?) -> Unit,
+    onOpenSettings: () -> Unit,
+    /** Abre a ajuda. Default vazio pela razão de sempre: os geradores de captura não a abrem. */
+    onOpenHelp: () -> Unit = {},
+    onOpenCliSessions: (UsageTargetKey) -> Unit = {},
+    onOpenCodexCliSessions: (UsageTargetKey) -> Unit = {},
+    onOpenTeamUsage: (UsageTargetKey) -> Unit = {},
+    /** Presença da conta do card — a porta do integrante comum. */
+    onOpenTeamPresence: (UsageTargetKey) -> Unit = {},
+    /** Janela "Análise" da conta do card (rodada AB). */
+    onOpenAnalysis: (UsageTargetKey) -> Unit = {},
+    /** Perfis que participam do time; vazio esconde o botão de todos os cards. */
+    teamEnabledProfileIds: Set<String> = emptySet(),
+    /**
+     * Semáforo de saúde das sessões em curso, por card.
+     *
+     * Faz o botão correspondente piscar na cor da severidade enquanto houver
+     * sessão com interação recente pedindo atenção. Vazio deixa tudo em repouso.
+     */
+    cliSessionPulses: Map<UsageTargetKey, SessionPulse> = emptyMap(),
+    teamSessionPulses: Map<UsageTargetKey, SessionPulse> = emptyMap(),
+    /** A cor escolhida por conta Claude (issue #275), por `profileId`. */
+    accountColors: Map<String, AccountAccent> = emptyMap(),
+    /** O emoji escolhido por conta Claude (issue #287), por `profileId`. */
+    accountEmojis: Map<String, AccountEmoji> = emptyMap(),
+    /** `null` esconde o botão de todas as contas — só quem administra o recebe. */
+    onOpenAdminOverview: (() -> Unit)? = null,
+    /**
+     * Presença de **todas** as contas do servidor — a porta do administrador.
+     *
+     * Separada de [onOpenTeamPresence] porque os escopos são outros: aquela é a
+     * conta de um card, esta é o servidor inteiro. Um parâmetro só obrigaria a
+     * inventar um `UsageTargetKey` que não corresponde a card nenhum.
+     */
+    onOpenTeamPresenceOverview: (() -> Unit)? = null,
+    /**
+     * Exporta o retrato corrente das cotas (issue #215). Recebe a lista que já
+     * está na tela — o mesmo `uiState.data` — e devolve o caminho gravado, ou
+     * `null` quando o usuário cancelou o diálogo. `null` aqui (o parâmetro,
+     * não o retorno) esconde o botão, mesma razão de [onOpenAdminOverview]:
+     * os geradores de captura não escrevem em disco.
+     */
+    onExportSnapshot: (suspend (List<ApiUsageStats>) -> String?)? = null,
+    /** Registra a exceção de exportação no relatório de diagnóstico. */
+    onExportFailure: (Throwable) -> Unit = {},
+    modifier: Modifier = Modifier,
+    countdownUpdatesEnabled: Boolean = true
+) {
+    val uiState by viewModel.uiState.collectAsState()
+    val nextRefreshAt by viewModel.nextRefreshAt.collectAsState()
+    val refreshingTargets by viewModel.refreshingTargets.collectAsState()
+    val toastMessage by viewModel.toastMessage.collectAsState()
+    val appUpdateState by viewModel.appUpdateState.collectAsState()
+    val snackbarHostState = remember { SnackbarHostState() }
+    val coroutineScope = rememberCoroutineScope()
+    var pendingRefreshAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+
+    // Fecha sobre `uiState`/`onExportSnapshot` correntes: o clique no rodapé
+    // não carrega o retrato consigo, e um card atualizado entre a composição
+    // do botão e o clique não pode exportar o congelado.
+    //
+    // Cancelar o diálogo devolve `null` e não mostra nada — mesma regra da
+    // exportação da tela de Sessões CLI: não é sucesso nem erro.
+    val handleExportSnapshot: (() -> Unit)? = onExportSnapshot?.let { exportAction ->
+        {
+            val stats = (uiState as? UiState.Success)?.data
+            if (stats != null) {
+                coroutineScope.launch {
+                    val message = runCatching { exportAction(stats) }.fold(
+                        onSuccess = { path -> if (path == null) null else ExportLabels.exportSaved(path, language) },
+                        onFailure = { error ->
+                            onExportFailure(error)
+                            ExportLabels.exportFailed(error.message ?: UNKNOWN_ERROR_MESSAGE, language)
+                        }
+                    )
+                    if (message != null) {
+                        snackbarHostState.showSnackbar(message, duration = SnackbarDuration.Long)
+                    }
+                }
+            }
+        }
+    }
+
+    // O vencimento de uma janela de cota é uma virada de relógio, não de dados:
+    // sem este laço o card repetiria o reset já passado como se fosse futuro até
+    // alguma coleta trazer números diferentes. A espera é até o próximo
+    // `periodEndAt`, não um tique periódico — nada recompõe à toa.
+    var quotaClock by remember { mutableStateOf(Clock.System.now()) }
+    LaunchedEffect(uiState, countdownUpdatesEnabled) {
+        if (!countdownUpdatesEnabled) {
+            return@LaunchedEffect
+        }
+        val visibleStats = (uiState as? UiState.Success)?.data ?: return@LaunchedEffect
+        while (true) {
+            val current = Clock.System.now()
+            quotaClock = current
+            val nextExpiry = nextQuotaExpiry(visibleStats, current) ?: return@LaunchedEffect
+            delay((nextExpiry - current).inWholeMilliseconds + QUOTA_EXPIRY_MARGIN_MILLIS)
+        }
+    }
+
+    LaunchedEffect(toastMessage) {
+        toastMessage?.let { toast ->
+            val msg = decodeToastMessage(toast, language)
+            snackbarHostState.showSnackbar(msg, duration = SnackbarDuration.Long)
+            viewModel.clearToast()
+        }
+    }
+
+    Scaffold(
+        bottomBar = {
+            FooterBar(
+                appVersion = appVersion,
+                language = language,
+                nextRefreshAt = nextRefreshAt,
+                onRefresh = { pendingRefreshAction = { viewModel.refresh() } },
+                onOpenSettings = onOpenSettings,
+                onOpenHelp = onOpenHelp,
+                countdownUpdatesEnabled = countdownUpdatesEnabled,
+                onOpenAdminOverview = onOpenAdminOverview,
+                onOpenTeamPresence = onOpenTeamPresenceOverview,
+                onExportSnapshot = handleExportSnapshot
+            )
+        },
+        containerColor = MaterialTheme.colorScheme.background
+    ) { scaffoldPadding ->
+        Column(
+            modifier = modifier.fillMaxSize(),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(scaffoldPadding)
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    // A faixa de atualização entra e sai deslizando. Ela sumia no
+                    // quadro em que a versão era aplicada e a grade inteira pulava
+                    // para cima; o último estado não nulo é o que a saída desenha.
+                    val shownUpdateState = rememberLatestNonNull(appUpdateState)
+                    AppExpandable(expanded = appUpdateState != null) {
+                        if (shownUpdateState != null) {
+                            AppUpdateBanner(
+                                state = shownUpdateState,
+                                language = language,
+                                onOpenRelease = { viewModel.openUpdateReleasePage() },
+                                onRestartAndUpdate = { viewModel.restartAndUpdateNow() },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = AppSpacing.md, vertical = AppSpacing.xs)
+                            )
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                    ) {
+                        // O estado vem **pelo parâmetro** da lambda. A versão
+                        // anterior lia `uiState` de fora e desenhava o estado novo
+                        // nos dois slots da transição: o esqueleto sumia no
+                        // primeiro quadro e duas grades se sobrepunham.
+                        AppStateCrossfade(
+                            state = uiState,
+                            label = "dashboardStateContent"
+                        ) { state ->
+                            when (state) {
+                                is UiState.Loading -> LoadingContent(language = language)
+                                UiState.NoApisEnabled -> NoApisEnabledContent(
+                                    language = language,
+                                    onOpenSettings = onOpenSettings
+                                )
+                                is UiState.Error -> ErrorContent(
+                                    errors = state.errors,
+                                    language = language,
+                                    onRetryAll = { viewModel.refresh() },
+                                    onRetryTarget = { target -> viewModel.refresh(target) }
+                                )
+                                is UiState.Success -> SuccessContent(
+                                    apiStatsList = state.data,
+                                    now = quotaClock,
+                                    partialErrors = state.errors,
+                                    riskSummaries = state.riskSummaries,
+                                    refreshingTargets = refreshingTargets,
+                                    cardOrder = cardOrder,
+                                    minimizedCards = minimizedCards,
+                                    language = language,
+                                    onRefreshCard = { target -> pendingRefreshAction = { viewModel.refresh(target) } },
+                                    onMoveCardToIndex = onMoveCardToIndex,
+                                    onToggleCardMinimized = onToggleCardMinimized,
+                                    onOpenHistoryCard = onOpenHistory,
+                                    onOpenCliSessionsCard = onOpenCliSessions,
+                                    onOpenCodexCliSessionsCard = onOpenCodexCliSessions,
+                                    onOpenTeamUsageCard = onOpenTeamUsage,
+                                    onOpenTeamPresenceCard = onOpenTeamPresence,
+                                    onOpenAnalysisCard = onOpenAnalysis,
+                                    teamEnabledProfileIds = teamEnabledProfileIds,
+                                    cliSessionPulses = cliSessionPulses,
+                                    teamSessionPulses = teamSessionPulses,
+                                    accountColors = accountColors,
+                                    accountEmojis = accountEmojis,
+                                    onRetryTarget = { target -> viewModel.refresh(target) },
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Sobreposição, e não uma linha da coluna: dentro dela o aviso
+                // empurrava a grade para baixo ao aparecer e a puxava de volta ao
+                // sumir -- dois saltos por aviso. Por cima, ele não mexe em nada.
+                SnackbarHost(
+                    hostState = snackbarHostState,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(horizontal = AppSpacing.md, vertical = AppSpacing.md)
+                )
+            }
+        }
+    }
+
+    pendingRefreshAction?.let { action ->
+        RefreshWarningDialog(
+            language = language,
+            onConfirm = {
+                action()
+                pendingRefreshAction = null
+            },
+            onDismiss = { pendingRefreshAction = null }
+        )
+    }
+}
+
+@Composable
+private fun NoApisEnabledContent(
+    language: AppLanguage,
+    onOpenSettings: () -> Unit
+) {
+    val title = localized(language, "Nenhuma API monitorada está habilitada", "No monitored APIs are enabled")
+    val description = localized(language, "Abra as configurações e habilite pelo menos uma opção em APIs monitoradas para começar a carregar seus dados de uso.", "Open settings and enable at least one option in Monitored APIs to start loading your usage data.")
+    val actionLabel = localized(language, "Abrir configurações", "Open settings")
+
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .widthIn(max = 460.dp)
+                .padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            AppButton(
+                label = actionLabel,
+                onClick = onOpenSettings,
+                tone = AppButtonTone.PRIMARY
+            )
+        }
+    }
+}
+
+/**
+ * Carregando: esqueleto **estático**.
+ *
+ * O `ShimmerBox` que existia aqui foi apagado: era animação infinita na tela de
+ * abertura — a primeira coisa que um teste de componente do dashboard encontra,
+ * e a que travava o `waitForIdle`.
+ */
+@Composable
+private fun LoadingContent(language: AppLanguage) {
+    AppLoadingState(
+        message = localized(language, "Carregando dados das APIs...", "Loading API data..."),
+        modifier = Modifier.fillMaxSize()
+    )
+}
+
+@Composable
+private fun ErrorContent(
+    errors: List<UiApiError>,
+    language: AppLanguage,
+    onRetryAll: () -> Unit,
+    onRetryTarget: (UsageTargetKey) -> Unit
+) {
+    val warnings = errors.mapNotNull { error -> warningFor(error = error, language = language) }
+    val genericErrors = errors.filterNot { error ->
+        error.isConfigurationIssue || error.isRateLimitIssue || error.isServiceUnavailableIssue ||
+            error.isConnectivityIssue
+    }
+
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .widthIn(max = 420.dp)
+                .padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            warnings.forEach { warning ->
+                PersistentApiWarningBanner(
+                    title = warning.title,
+                    description = warning.description,
+                    actionLabel = warning.actionLabel,
+                    onAction = warningActionFor(
+                        warning = warning,
+                        onRetryTarget = onRetryTarget
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            if (genericErrors.isNotEmpty() || warnings.isEmpty()) {
+                AppErrorState(
+                    message = localized(language, "Erro ao carregar dados", "Failed to load data"),
+                    // Os erros genéricos entram como uma linha só: são as fontes
+                    // que falharam sem motivo reconhecido, e cada uma tem uma
+                    // frase própria vinda da camada de dados.
+                    detail = genericErrors.joinToString("\n") { error -> error.formattedMessage }
+                        .takeIf { text -> text.isNotEmpty() },
+                    retryLabel = localized(language, "Tentar novamente", "Retry"),
+                    onRetry = onRetryAll
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SuccessContent(
+    apiStatsList: List<ApiUsageStats>,
+    /** Instante contra o qual o vencimento das janelas de cota é medido. */
+    now: Instant,
+    partialErrors: List<UiApiError>,
+    riskSummaries: Map<UsageTargetKey, Map<QuotaSeriesKey, QuotaRiskSummary>>,
+    refreshingTargets: Set<UsageTargetKey>,
+    cardOrder: List<UsageTargetKey>,
+    minimizedCards: Set<UsageTargetKey>,
+    language: AppLanguage,
+    onRefreshCard: (UsageTargetKey) -> Unit,
+    onMoveCardToIndex: (UsageTargetKey, Int) -> Unit,
+    onToggleCardMinimized: (UsageTargetKey) -> Unit,
+    onOpenHistoryCard: (ApiSource, UsageAccountKey?) -> Unit,
+    onOpenCliSessionsCard: (UsageTargetKey) -> Unit = {},
+    onOpenCodexCliSessionsCard: (UsageTargetKey) -> Unit = {},
+    onOpenTeamUsageCard: (UsageTargetKey) -> Unit = {},
+    onOpenTeamPresenceCard: (UsageTargetKey) -> Unit = {},
+    onOpenAnalysisCard: (UsageTargetKey) -> Unit = {},
+    teamEnabledProfileIds: Set<String> = emptySet(),
+    cliSessionPulses: Map<UsageTargetKey, SessionPulse> = emptyMap(),
+    teamSessionPulses: Map<UsageTargetKey, SessionPulse> = emptyMap(),
+    accountColors: Map<String, AccountAccent> = emptyMap(),
+    accountEmojis: Map<String, AccountEmoji> = emptyMap(),
+    onRetryTarget: (UsageTargetKey) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val items = orderedByCardOrder(apiStatsList, cardOrder) { stats -> stats.targetKey }
+    val warnings = partialErrors.mapNotNull { error -> warningFor(error = error, language = language) }
+    val genericErrors = partialErrors.filterNot { error ->
+        error.isConfigurationIssue || error.isRateLimitIssue || error.isServiceUnavailableIssue ||
+            error.isConnectivityIssue
+    }
+    val scrollState = rememberScrollState()
+
+    Box(modifier = modifier.fillMaxSize()) {
+        // Sem folga própria para a barra de rolagem: ela flutua sobre o padding
+        // direito da grade, que é largo o bastante para não cobrir card nenhum.
+        // Somada ao padding da grade, a folga antiga deixava o lado direito com
+        // 28dp contra 16 do esquerdo — assimetria que a janela estreita denuncia.
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(scrollState)
+        ) {
+            if (warnings.isNotEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = AppSpacing.md, vertical = AppSpacing.sm),
+                    verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
+                ) {
+                    warnings.forEach { warning ->
+                        PersistentApiWarningBanner(
+                            title = warning.title,
+                            description = warning.description,
+                            actionLabel = warning.actionLabel,
+                            onAction = warningActionFor(
+                                warning = warning,
+                                onRetryTarget = onRetryTarget
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+
+            genericErrors.forEach { error ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = AppSpacing.md, vertical = AppSpacing.xs),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "⚠ ${error.formattedMessage}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+
+            ResponsiveDashboardCardGrid(
+                items = items,
+                refreshingTargets = refreshingTargets,
+                minimizedCards = minimizedCards,
+                riskSummaries = riskSummaries,
+                language = language,
+                onRefreshCard = onRefreshCard,
+                onMoveCardToIndex = onMoveCardToIndex,
+                onToggleCardMinimized = onToggleCardMinimized,
+                onOpenHistoryCard = onOpenHistoryCard,
+                onOpenCliSessionsCard = onOpenCliSessionsCard,
+                onOpenCodexCliSessionsCard = onOpenCodexCliSessionsCard,
+                onOpenTeamUsageCard = onOpenTeamUsageCard,
+                onOpenTeamPresenceCard = onOpenTeamPresenceCard,
+                onOpenAnalysisCard = onOpenAnalysisCard,
+                teamEnabledProfileIds = teamEnabledProfileIds,
+                cliSessionPulses = cliSessionPulses,
+                teamSessionPulses = teamSessionPulses,
+                accountColors = accountColors,
+                accountEmojis = accountEmojis,
+                now = now,
+                // 12/8 e não 16/12: numa janela estreita — que é como o app
+                // costuma ficar — a margem antiga comia largura que o card usa
+                // para caber sem quebrar as cotas em duas linhas.
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = AppSpacing.md, vertical = AppSpacing.sm)
+            )
+        }
+
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(scrollState),
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .fillMaxHeight()
+        )
+    }
+}

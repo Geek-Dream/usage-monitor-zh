@@ -1,0 +1,395 @@
+package com.usagemonitor.ui
+
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.runDesktopComposeUiTest
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import com.usagemonitor.HUD_APP_BALLOON_UPDATE_DETAIL_LINES
+import com.usagemonitor.HUD_APP_BALLOON_UPDATE_DETAIL_LINE
+import com.usagemonitor.HUD_APP_BALLOON_UPDATE_HEADLINE_LINE
+import com.usagemonitor.HUD_APP_BALLOON_UPDATE_TEXT_WIDTH
+import com.usagemonitor.HUD_BALLOON_GROUP_PADDING
+import com.usagemonitor.HUD_BALLOON_PADDING
+import androidx.compose.ui.text.font.FontWeight
+import com.usagemonitor.domain.entity.PeriodType
+import com.usagemonitor.domain.entity.QuotaInfo
+import com.usagemonitor.domain.entity.UsageUnit
+import com.usagemonitor.presentation.ui.RING_LEGEND_SIZE
+import com.usagemonitor.presentation.ui.hudQuotaTitle
+import com.usagemonitor.presentation.ui.hudResetCaption
+import com.usagemonitor.presentation.ui.components.resetShortLabel
+import com.usagemonitor.HUD_BALLOON_WIDTH
+import com.usagemonitor.HUD_COUNTDOWN_GAP
+import com.usagemonitor.HUD_COUNTDOWN_ICON
+import com.usagemonitor.domain.entity.ActiveSessionAlert
+import com.usagemonitor.domain.entity.ApiSource
+import com.usagemonitor.domain.entity.AppLanguage
+import com.usagemonitor.domain.entity.CliSessionHealth
+import com.usagemonitor.domain.entity.SessionPulse
+import com.usagemonitor.domain.entity.StalledCliSession
+import com.usagemonitor.domain.entity.UsageTargetKey
+import com.usagemonitor.presentation.ui.hudSessionSignals
+import com.usagemonitor.presentation.ui.hudQuitLabel
+import kotlin.time.Instant
+import com.usagemonitor.domain.entity.AppUpdateInfo
+import com.usagemonitor.presentation.ui.updateBannerContent
+import com.usagemonitor.presentation.viewmodel.AppUpdateFailureReason
+import com.usagemonitor.presentation.viewmodel.AppUpdateUiState
+import com.usagemonitor.percentWidth
+import com.usagemonitor.presentation.ui.HudStripLine
+import com.usagemonitor.stripLineWidth
+import com.usagemonitor.presentation.ui.theme.AppChrome
+import com.usagemonitor.presentation.ui.theme.AppSpacing
+import com.usagemonitor.presentation.ui.theme.AppTheme
+import com.usagemonitor.wordWidth
+import androidx.compose.foundation.layout.Column
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onGloballyPositioned
+import com.usagemonitor.presentation.ui.components.AppStatusPill
+import com.usagemonitor.presentation.ui.components.AppTone
+import com.usagemonitor.statusPillWidth
+import kotlin.test.Test
+import kotlin.test.assertTrue
+
+/**
+ * A estimativa de largura da geometria contra o texto que o Skia desenha.
+ *
+ * A geometria do notch não mede nada — estima pelo avanço da Plex Mono, e a
+ * janela nasce desse número. Em densidade fracionária (a escala de 115% sobre
+ * os 125% do Windows dá 1,4375) o avanço do glifo é arredondado para cima em
+ * pixel, o texto real sai mais largo que a conta, e o último item da faixa — a
+ * contagem — era o que ficava espremido: "04:5" na borda de cima. Na densidade
+ * 1 dos testes de componente a diferença não existia, e por isso nenhum deles
+ * pegou o defeito.
+ */
+@OptIn(ExperimentalTestApi::class)
+class HudNotchTextFitTest {
+
+    private val scales = (100..200 step 5).toList() + listOf(144, 172)
+
+    private val words = listOf("Sem projeção", "No forecast", "Crítico", "Atenção", "Carregando", "Loading", "Nenhuma API", "No APIs")
+    private val percents = listOf("100%", "88%", "\$2.27")
+
+    /** As linhas com a janela (#286), em `labelSmall`: o pior caso de cada rótulo. */
+    private val stripLines = listOf(
+        HudStripLine("7d", "100%"), HudStripLine("5h", "100%"), HudStripLine("30d", "100%"),
+        HudStripLine("Créditos", "100%"), HudStripLine("5h", "<1%")
+    )
+
+    @Test
+    fun `a estimativa da geometria cobre o texto desenhado em qualquer escala`() = runDesktopComposeUiTest {
+        val failures = mutableSetOf<String>()
+        var scale by mutableStateOf(scales.first())
+        setContent {
+                AppTheme(isDark = true, uiScalePercent = scale) {
+                    val measurer = rememberTextMeasurer()
+                    val density = LocalDensity.current
+                    val small = MaterialTheme.typography.labelSmall
+                    val medium = MaterialTheme.typography.labelMedium
+                    fun drawn(text: String, style: TextStyle): Dp {
+                        val px = measurer.measure(text, style).size.width
+                        return with(density) { px.toDp() }
+                    }
+                    words.forEach { word ->
+                        val real = drawn(word, small)
+                        if (real > wordWidth(word)) failures += "$scale%: \"$word\" desenhado $real > estimado ${wordWidth(word)}"
+                    }
+                    percents.forEach { percent ->
+                        val real = drawn(percent, medium)
+                        if (real > percentWidth(percent)) failures += "$scale%: \"$percent\" desenhado $real > estimado ${percentWidth(percent)}"
+                    }
+                    stripLines.forEach { line ->
+                        val real = drawn(line.text, small)
+                        if (real > stripLineWidth(line)) failures += "$scale%: linha \"${line.text}\" desenhada $real > estimada ${stripLineWidth(line)}"
+                    }
+                }
+        }
+        for (next in scales) {
+            scale = next
+            waitForIdle()
+        }
+        assertTrue(failures.isEmpty(), failures.sorted().joinToString("\n"))
+    }
+
+    /**
+     * Os sinais de sessão (issue #265) cabem numa linha do balão em qualquer
+     * escala, no pior caso de contagem e de tempo: a linha é `maxLines = 1` com
+     * reticências, e cortada ela perderia justamente o número.
+     */
+    @Test
+    fun `os sinais de sessao cabem numa linha do balao em qualquer escala`() = runDesktopComposeUiTest {
+        val failures = mutableSetOf<String>()
+        var scale by mutableStateOf(scales.first())
+        val work = UsageTargetKey(ApiSource.ANTHROPIC, "work")
+        val now = Instant.parse("2026-09-25T12:00:00Z")
+        val pulse = SessionPulse(
+            List(99) { index -> ActiveSessionAlert("s$index", CliSessionHealth.SATURATED, now) } +
+                List(99) { index -> ActiveSessionAlert("a$index", CliSessionHealth.ATTENTION, now) }
+        )
+        val stalled = List(99) { index ->
+            StalledCliSession("t$index", null, "work", now, pendingMillis = (23 * 60 + 59) * 60_000L)
+        }
+        val texts = AppLanguage.entries.flatMap { language ->
+            hudSessionSignals(work, pulse, stalled, language) +
+                hudSessionSignals(work, null, stalled.take(1), language)
+        }.map { signal -> signal.text }
+        setContent {
+            AppTheme(isDark = true, uiScalePercent = scale) {
+                val measurer = rememberTextMeasurer()
+                val density = LocalDensity.current
+                val column = HUD_BALLOON_WIDTH - HUD_BALLOON_PADDING * 2
+                texts.forEach { text ->
+                    val result = measurer.measure(
+                        text = text,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        constraints = Constraints(maxWidth = with(density) { column.roundToPx() })
+                    )
+                    if (result.hasVisualOverflow) failures += "$scale%: \"$text\" não cabe em $column"
+                }
+            }
+        }
+        for (next in scales) {
+            scale = next
+            waitForIdle()
+        }
+        assertTrue(texts.size >= 8, "sinais do pior caso: $texts")
+        assertTrue(failures.isEmpty(), failures.sorted().joinToString("\n"))
+    }
+
+    /**
+     * O banner e o botão da atualização no balão da engrenagem cabem, inteiros, no
+     * que a geometria reserva (issues #274 e #291): título numa linha, detalhe em
+     * até duas, rótulo do botão numa. A primeira versão desta frase, "…it will be
+     * applied when Usage Monitor closes", saía em três linhas no balão. Versão com
+     * três dígitos por campo é o pior caso de largura, e os quatro estados entram.
+     * O botão de sair do balão (#416) entra pela mesma medida.
+     */
+    @Test
+    fun `o banner e o botao da atualizacao cabem no balao em qualquer escala`() = runDesktopComposeUiTest {
+        val failures = mutableSetOf<String>()
+        var scale by mutableStateOf(scales.first())
+        val update = AppUpdateInfo(version = "138.100.100", releasePageUrl = "https://example.com")
+        // Beta (issue #355): o número é mais comprido e a linha curta troca
+        // "versão" por "beta"; dois dígitos em cada parte e no contador.
+        val beta = AppUpdateInfo(version = "42.10.10-beta.12", releasePageUrl = "https://example.com")
+        val states = listOf(update, beta).flatMap { info ->
+            listOf(
+                AppUpdateUiState.Available(info),
+                AppUpdateUiState.Downloading(info, percent = 100),
+                AppUpdateUiState.Downloading(info, percent = null),
+                AppUpdateUiState.Downloaded(info),
+                AppUpdateUiState.Failed(info, AppUpdateFailureReason.DOWNLOAD),
+                AppUpdateUiState.Failed(info, AppUpdateFailureReason.SCHEDULE)
+            )
+        }
+        val contents = AppLanguage.entries.flatMap { language ->
+            states.map { state -> updateBannerContent(state, language) }
+        }
+        setContent {
+            AppTheme(isDark = true, uiScalePercent = scale) {
+                val measurer = rememberTextMeasurer()
+                val density = LocalDensity.current
+                val typography = MaterialTheme.typography
+                // O botão desconta o padding horizontal de 12dp de cada lado. Ele fica
+                // abaixo do aviso: dentro dele (F10) o rótulo não cabia.
+                val buttonText = HUD_BALLOON_WIDTH - HUD_BALLOON_PADDING * 2 - AppSpacing.md * 2
+                fun overflow(text: String, style: TextStyle, width: Dp, lines: Int, height: Dp): String? {
+                    val result = measurer.measure(
+                        text = text,
+                        style = style,
+                        maxLines = lines,
+                        constraints = Constraints(maxWidth = with(density) { width.roundToPx() })
+                    )
+                    val drawnHeight = with(density) { result.size.height.toDp() }
+                    return when {
+                        result.hasVisualOverflow -> "\"$text\" não cabe em $lines linhas de $width"
+                        drawnHeight > height -> "\"$text\" mede $drawnHeight > $height"
+                        else -> null
+                    }
+                }
+                contents.forEach { content ->
+                    overflow(content.headline, typography.titleSmall, HUD_APP_BALLOON_UPDATE_TEXT_WIDTH, 1, HUD_APP_BALLOON_UPDATE_HEADLINE_LINE)
+                        ?.let { failure -> failures += "$scale%: $failure" }
+                    overflow(
+                        content.detail,
+                        typography.bodySmall,
+                        HUD_APP_BALLOON_UPDATE_TEXT_WIDTH,
+                        HUD_APP_BALLOON_UPDATE_DETAIL_LINES,
+                        HUD_APP_BALLOON_UPDATE_DETAIL_LINE * HUD_APP_BALLOON_UPDATE_DETAIL_LINES
+                    )?.let { failure -> failures += "$scale%: $failure" }
+                    content.actionLabel?.let { label ->
+                        overflow(label, typography.labelLarge, buttonText, 1, AppChrome.control)
+                            ?.let { failure -> failures += "$scale%: $failure" }
+                    }
+                }
+                // "Sair do Usage Monitor" (#416) é o mesmo `AppButton`, sempre presente.
+                AppLanguage.entries.forEach { language ->
+                    overflow(hudQuitLabel(language), typography.labelLarge, buttonText, 1, AppChrome.control)
+                        ?.let { failure -> failures += "$scale%: $failure" }
+                }
+                // F10: os sinais de sessão viraram as linhas do aviso da conta, com
+                // a mesma largura de texto do aviso de atualização e uma linha cada.
+                SESSION_SIGNAL_SAMPLES.forEach { signal ->
+                    overflow(signal, typography.bodySmall, HUD_APP_BALLOON_UPDATE_TEXT_WIDTH, 1, 17.dp)
+                        ?.let { failure -> failures += "$scale%: $failure" }
+                }
+            }
+        }
+        for (next in scales) {
+            scale = next
+            waitForIdle()
+        }
+        assertTrue(failures.isEmpty(), failures.sorted().joinToString("\n"))
+    }
+
+    /**
+     * A pílula de estado (issue #322) inteira — folga, ponto, vão e palavra —
+     * cabe no que a geometria reserva, em qualquer escala. O teste de texto acima
+     * só mede a palavra; é aqui que o arredondamento de cada peça da pílula soma.
+     */
+    @Test
+    fun `a pilula de estado cabe na largura estimada em qualquer escala`() = runDesktopComposeUiTest {
+        val failures = mutableSetOf<String>()
+        var scale by mutableStateOf(scales.first())
+        val statusWords = listOf("Sem projeção", "No forecast", "Crítico", "Atenção", "Normal", "Critical", "Warning")
+        setContent {
+            AppTheme(isDark = true, uiScalePercent = scale) {
+                val density = LocalDensity.current
+                Column {
+                    statusWords.forEach { word ->
+                        AppStatusPill(
+                            label = word,
+                            tone = AppTone.WARNING,
+                            modifier = Modifier.onGloballyPositioned { coordinates ->
+                                val real = with(density) { coordinates.size.width.toDp() }
+                                if (real > statusPillWidth(word)) {
+                                    failures += "$scale%: pílula \"$word\" desenhada $real > estimada ${statusPillWidth(word)}"
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+        }
+        for (next in scales) {
+            scale = next
+            waitForIdle()
+        }
+        assertTrue(failures.isEmpty(), failures.sorted().joinToString("\n"))
+    }
+
+    /**
+     * O cabeçalho do balão da engrenagem: "Usage Monitor" e a versão instalada
+     * numa linha, a contagem sozinha na de baixo. Dividindo a linha com "próxima
+     * coleta em", a versão ficava com ~50dp e "v41.6.0-beta.2" saía "v41.6.0…".
+     * A beta com dois dígitos em cada parte é o pior caso.
+     */
+    @Test
+    fun `a versao e a contagem cabem inteiras no balao da engrenagem`() = runDesktopComposeUiTest {
+        val failures = mutableSetOf<String>()
+        var scale by mutableStateOf(scales.first())
+        val inner = HUD_BALLOON_WIDTH - HUD_BALLOON_PADDING * 2
+        setContent {
+            AppTheme(isDark = true, uiScalePercent = scale) {
+                val measurer = rememberTextMeasurer()
+                val density = LocalDensity.current
+                val typography = MaterialTheme.typography
+                fun width(text: String, style: TextStyle): Dp {
+                    return with(density) { measurer.measure(text, style, maxLines = 1).size.width.toDp() }
+                }
+                val header = width("Usage Monitor", typography.titleSmall) + 6.dp + width("v42.10.10-beta.12", typography.labelSmall)
+                if (header > inner) {
+                    failures += "$scale%: cabeçalho mede $header > $inner"
+                }
+                listOf("Próxima coleta em", "Next fetch in").forEach { label ->
+                    val status = width(label, typography.labelSmall) + 4.dp + HUD_COUNTDOWN_ICON + HUD_COUNTDOWN_GAP +
+                        width("00:00", typography.labelSmall)
+                    if (status > inner) {
+                        failures += "$scale%: \"$label\" com a contagem mede $status > $inner"
+                    }
+                }
+            }
+        }
+        for (next in scales) {
+            scale = next
+            waitForIdle()
+        }
+        assertTrue(failures.isEmpty(), failures.sorted().joinToString("\n"))
+    }
+
+    /**
+     * Com a data no reinício da semanal e da mensal (issue #474) a legenda cresceu, e
+     * quem cede é o título, `weight(1f)` com reticências. Título e legenda saem dos
+     * produtores reais, com o glifo do anel e dentro da caixa de grupo (Antigravity,
+     * Cursor), o pior caso de largura; hora 23h59 é a mais larga. Dia, data e hora
+     * juntos ("Reinicia Sex 30/10 23h59", 161dp) deixavam 33dp para "Mensal" (43dp).
+     */
+    @Test
+    fun `o titulo e o reinicio com data cabem na linha da cota em qualquer escala`() = runDesktopComposeUiTest {
+        val failures = mutableSetOf<String>()
+        var scale by mutableStateOf(scales.first())
+        val resetAt = Instant.parse("2026-10-31T02:59:00Z")
+        val now = Instant.parse("2026-10-27T12:00:00Z")
+        val quotas = listOf(PeriodType.WEEKLY, PeriodType.MONTHLY).map { period ->
+            QuotaInfo(
+                label = "Antigravity Gemini Pro 7d", used = 41L, total = 100L, periodEndAt = resetAt,
+                periodType = period, unit = UsageUnit.PERCENTAGE
+            )
+        }
+        val rows = AppLanguage.entries.flatMap { language ->
+            quotas.map { quota ->
+                hudQuotaTitle(quota, language) to hudResetCaption(requireNotNull(resetShortLabel(quota, language, now)), language)
+            }
+        }
+        val column = HUD_BALLOON_WIDTH - HUD_BALLOON_PADDING * 2 - HUD_BALLOON_GROUP_PADDING * 2
+        setContent {
+            AppTheme(isDark = true, uiScalePercent = scale) {
+                val measurer = rememberTextMeasurer()
+                val density = LocalDensity.current
+                val typography = MaterialTheme.typography
+                rows.forEach { (title, caption) ->
+                    val captionWidth = with(density) {
+                        measurer.measure(caption, typography.labelSmall, maxLines = 1).size.width.toDp()
+                    }
+                    // Glifo, título e legenda com os dois vãos de 8dp da `Row` do balão.
+                    val titleRoom = column - RING_LEGEND_SIZE - 8.dp * 2 - captionWidth
+                    val result = measurer.measure(
+                        text = title,
+                        style = typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                        maxLines = 1,
+                        constraints = Constraints(maxWidth = with(density) { titleRoom.roundToPx().coerceAtLeast(0) })
+                    )
+                    if (result.hasVisualOverflow) {
+                        failures += "$scale%: \"$title\" não cabe ao lado de \"$caption\" ($captionWidth, sobram $titleRoom)"
+                    }
+                }
+            }
+        }
+        for (next in scales) {
+            scale = next
+            waitForIdle()
+        }
+        assertTrue(rows.any { (_, caption) -> caption == "Reinicia 30/10 23h59" }, "legendas: $rows")
+        assertTrue(failures.isEmpty(), failures.sorted().joinToString("\n"))
+    }
+}
+
+/** Os sinais mais compridos que `hudSessionSignals` produz, nas duas línguas. */
+private val SESSION_SIGNAL_SAMPLES = listOf(
+    "Contexto saturado · 12 sessões",
+    "Contexto crescendo · 12 sessões",
+    "Context saturated · 12 sessions",
+    "Context growing · 12 sessions",
+    "12 sem resposta · até 23h59",
+    "12 with no reply · up to 23h59",
+    "Sem resposta há 23h59"
+)

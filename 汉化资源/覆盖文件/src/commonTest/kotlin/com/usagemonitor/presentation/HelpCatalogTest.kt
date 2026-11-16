@@ -1,0 +1,185 @@
+package com.usagemonitor.presentation
+
+import com.usagemonitor.domain.entity.AppLanguage
+import com.usagemonitor.domain.entity.AppUpdateInfo
+import com.usagemonitor.presentation.ui.components.BETA_UPDATES_LABEL_EN
+import com.usagemonitor.presentation.ui.components.BETA_UPDATES_LABEL_PT
+import com.usagemonitor.presentation.ui.updateBannerContent
+import com.usagemonitor.presentation.viewmodel.AppUpdateUiState
+import com.usagemonitor.presentation.ui.help.HelpCatalog
+import com.usagemonitor.presentation.ui.help.HelpTopic
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+
+class HelpCatalogTest {
+
+    /**
+     * Tópico sem tradução vira português no meio da tela em inglês, e o `when`
+     * exaustivo do Kotlin não pega isso: pega a entrada faltando, não a entrada
+     * vazia. Mesma razão do teste equivalente do glossário das sessões.
+     */
+    @Test
+    fun `every topic is filled in both languages`() {
+        for (topic in HelpTopic.entries) {
+            for (language in AppLanguage.entries) {
+                val entry = HelpCatalog.entry(topic, language)
+                assertTrue(entry.title.isNotBlank(), "título vazio para $topic em $language")
+                assertTrue(entry.summary.isNotBlank(), "resumo vazio para $topic em $language")
+                assertTrue(
+                    entry.description.isNotBlank(),
+                    "descrição vazia para $topic em $language"
+                )
+                assertTrue(entry.mediaId.isNotBlank(), "mídia vazia para $topic em $language")
+            }
+        }
+    }
+
+    /**
+     * Descrição sem caminho de ativação descreve algo que o leitor não alcança —
+     * e é justamente o "como ativar" que a issue pede.
+     */
+    @Test
+    fun `every topic states how to enable it`() {
+        for (topic in HelpTopic.entries) {
+            for (language in AppLanguage.entries) {
+                val steps = HelpCatalog.entry(topic, language).steps
+                assertTrue(steps.isNotEmpty(), "sem passos para $topic em $language")
+                assertTrue(
+                    steps.none { step -> step.isBlank() },
+                    "passo vazio para $topic em $language"
+                )
+            }
+        }
+    }
+
+    /**
+     * O passo de atualização cita o rótulo que o botão **realmente** tem. A ajuda
+     * mandava procurar "Reiniciar e atualizar agora", e trocar o rótulo sem trocar
+     * o passo manda o usuário atrás de um botão que não existe (issue #274).
+     */
+    @Test
+    fun `the updates step quotes the real restart action label`() {
+        val update = AppUpdateInfo(version = "38.0.0", releasePageUrl = "https://example.com")
+        for (language in AppLanguage.entries) {
+            val label = updateBannerContent(AppUpdateUiState.Downloaded(update), language).actionLabel
+            requireNotNull(label)
+            val steps = HelpCatalog.entry(HelpTopic.UPDATES, language).steps
+            assertTrue(steps.any { step -> "\"$label\"" in step }, "passo sem \"$label\" em $language")
+        }
+    }
+
+    /** Issue #355: o passo do canal beta cita o rótulo real do interruptor. */
+    @Test
+    fun `the updates steps quote the real beta switch label`() {
+        AppLanguage.entries.forEach { language ->
+            val label = if (language == AppLanguage.PT) BETA_UPDATES_LABEL_PT else BETA_UPDATES_LABEL_EN
+            val steps = HelpCatalog.entry(HelpTopic.UPDATES, language).steps
+            assertTrue(steps.any { step -> "\"$label\"" in step }, "passo sem \"$label\" em $language")
+        }
+    }
+
+    /**
+     * "Reinicie o app" era lido como reiniciar o computador (issue #274): toda
+     * menção a reiniciar nomeia o Usage Monitor.
+     */
+    @Test
+    fun `no help text asks to restart without naming the app`() {
+        val ambiguous = listOf("reinicie o app", "restart the app", "reiniciar e atualizar agora", "restart and update now")
+        for (topic in HelpTopic.entries) {
+            for (language in AppLanguage.entries) {
+                val entry = HelpCatalog.entry(topic, language)
+                val text = (listOf(entry.summary, entry.description) + entry.steps).joinToString("\n").lowercase()
+                ambiguous.forEach { phrase ->
+                    assertTrue(phrase !in text, "\"$phrase\" em $topic ($language)")
+                }
+            }
+        }
+    }
+
+    /** A tela lista o catálogo inteiro; um tópico fora da ordem fica invisível. */
+    @Test
+    fun `the reading order covers every topic exactly once`() {
+        assertEquals(HelpTopic.entries.toSet(), HelpCatalog.readingOrder.toSet())
+        assertEquals(HelpCatalog.readingOrder.size, HelpCatalog.readingOrder.toSet().size)
+    }
+
+    /** PT e EN têm de ser textos distintos: repetir um deles é tradução esquecida. */
+    @Test
+    fun `the two languages do not share the same description`() {
+        for (topic in HelpTopic.entries) {
+            val portuguese = HelpCatalog.entry(topic, AppLanguage.PT)
+            val english = HelpCatalog.entry(topic, AppLanguage.EN)
+            assertTrue(
+                portuguese.description != english.description,
+                "descrição idêntica nos dois idiomas para $topic"
+            )
+            assertTrue(
+                portuguese.title != english.title,
+                "título idêntico nos dois idiomas para $topic"
+            )
+        }
+    }
+
+    /**
+     * O identificador de mídia é o nome do recurso `help/<id>.gif`. Dois tópicos
+     * com o mesmo id mostrariam a mesma demo sem erro nenhum, e o id só pode
+     * conter o que serve de nome de arquivo em qualquer plataforma.
+     */
+    @Test
+    fun `media ids are unique and file safe`() {
+        val ids = HelpTopic.entries.map { topic -> HelpCatalog.mediaId(topic) }
+        assertEquals(ids.size, ids.toSet().size, "id de mídia repetido: $ids")
+
+        val allowed = Regex("[a-z0-9-]+")
+        for (id in ids) {
+            assertTrue(allowed.matches(id), "id de mídia fora do formato: $id")
+        }
+    }
+
+    /** O id não muda com o idioma: as demos são geradas só em português. */
+    @Test
+    fun `the media id does not change with the language`() {
+        for (topic in HelpTopic.entries) {
+            assertEquals(
+                HelpCatalog.entry(topic, AppLanguage.PT).mediaId,
+                HelpCatalog.entry(topic, AppLanguage.EN).mediaId
+            )
+        }
+    }
+
+    /**
+     * Issue #551: a chave é por conta e o campo fica no bloco "Contas" de Configurações › Time.
+     * O passo tem de citar esse rótulo e esse bloco, e nunca a "Chave do time" que saiu da tela.
+     */
+    @Test
+    fun `the team steps quote the account key inside the Accounts block`() {
+        val accountKeyLabel = mapOf(
+            AppLanguage.PT to "Chave da conta",
+            AppLanguage.EN to "Account key",
+            AppLanguage.ZH to "账户密钥"
+        )
+        val accountsBlock = mapOf(
+            AppLanguage.PT to "\"Contas\"",
+            AppLanguage.EN to "\"Accounts\"",
+            AppLanguage.ZH to "“账户”"
+        )
+        for (language in AppLanguage.entries) {
+            val steps = HelpCatalog.entry(HelpTopic.TEAM, language).steps
+            val label = if (language == AppLanguage.ZH) {
+                "“${accountKeyLabel.getValue(language)}”"
+            } else {
+                "\"${accountKeyLabel.getValue(language)}\""
+            }
+            val block = accountsBlock.getValue(language)
+            assertTrue(
+                steps.any { step -> label in step && block in step },
+                "passo sem $label no bloco $block em $language"
+            )
+            assertTrue(
+                steps.none { step -> "Chave do time" in step || "Team key" in step || "团队密钥" in step },
+                "passo cita a chave do time, que não existe mais, em $language"
+            )
+        }
+    }
+}

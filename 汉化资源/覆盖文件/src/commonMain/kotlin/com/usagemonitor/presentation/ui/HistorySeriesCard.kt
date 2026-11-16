@@ -1,0 +1,107 @@
+package com.usagemonitor.presentation.ui
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import com.usagemonitor.domain.entity.ApiSource
+import com.usagemonitor.domain.entity.AppLanguage
+import com.usagemonitor.domain.entity.UsageHistorySeries
+import com.usagemonitor.presentation.ui.components.AppDataSurfaceFlush
+import com.usagemonitor.presentation.ui.components.AppSectionHeader
+import com.usagemonitor.presentation.ui.components.UsageHistoryLineChart
+import com.usagemonitor.presentation.ui.theme.AppAccents
+import com.usagemonitor.presentation.ui.theme.AppSpacing
+import com.usagemonitor.presentation.viewmodel.HistoryQuotaView
+import kotlin.time.Instant
+
+@Composable
+internal fun HistorySeriesCard(
+    source: ApiSource, series: UsageHistorySeries, index: Int, accentColor: Color,
+    language: AppLanguage, chartSelectionKey: String, titleOverride: String? = null,
+    subtitleOverride: String? = null, weeklySummary: UsageHistorySeries? = null,
+    referenceAt: Instant? = null, quotaView: HistoryQuotaView = HistoryQuotaView.BOTH,
+    monthlySummary: UsageHistorySeries? = null
+) {
+    var metricsExpanded by remember(chartSelectionKey) { mutableStateOf(true) }
+    // Nasce aberta (#392): a lista de janelas e o detalhe são a resposta da issue.
+    var analysisExpanded by remember(chartSelectionKey) { mutableStateOf(true) }
+    val title = titleOverride ?: historySeriesDisplayTitle(source, series, language)
+    val subtitle = subtitleOverride ?: historySeriesDisplaySubtitle(source, series, language)
+    val chartSeries = if (quotaView == HistoryQuotaView.WEEKLY && weeklySummary != null) weeklySummary else series
+    val visibleSeries = when {
+        weeklySummary == null -> listOf(series)
+        quotaView == HistoryQuotaView.WEEKLY -> listOf(weeklySummary)
+        quotaView == HistoryQuotaView.INTERVAL -> listOf(series)
+        else -> listOfNotNull(series, weeklySummary, monthlySummary)
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(AppSpacing.md)) {
+        HistorySummary(historyMetricEntries(source, chartSeries, language, referenceAt), chartSelectionKey)
+        AppDataSurfaceFlush(header = { AppSectionHeader(title = title, subtitle = subtitle, markerColor = accentColor) }) {
+            Column(Modifier.fillMaxWidth().padding(AppSpacing.sm)) {
+                UsageHistoryLineChart(
+                    points = chartSeries.points, unit = chartSeries.unit, language = language,
+                    chartSelectionKey = "$chartSelectionKey:${quotaView.name}", tooltipTitle = title, tooltipSubtitle = subtitle,
+                    accentColor = accentColor, previousPoints = chartSeries.previousWindowPoints,
+                    seriesLabel = quotaWindowLabel(chartSeries, language),
+                    overlays = historyChartOverlays(
+                        weeklySummary.takeIf { quotaView == HistoryQuotaView.BOTH }, series, AppAccents.current.output, language,
+                        monthlySummary = monthlySummary.takeIf { quotaView == HistoryQuotaView.BOTH && weeklySummary != null },
+                        monthlyColor = AppAccents.current.savings
+                    ),
+                    showActiveSpans = chartSeries.windows.isNotEmpty(),
+                    activeSpanKey = historyActiveSpanKey(chartSeries, language)
+                )
+            }
+        }
+        HistoryDetailsSection(
+            localized(language, "Resumo das cotas", "Quota summary"),
+            "historyMetrics:$chartSelectionKey", metricsExpanded, { metricsExpanded = !metricsExpanded }, language
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(AppSpacing.md)) {
+                visibleSeries.forEach { item ->
+                    HistoryMetricsPanel(
+                        title = when {
+                            item == monthlySummary -> monthlySummaryLabel(language)
+                            weeklySummary != null -> if (item == weeklySummary) weeklySummaryLabel(language) else intervalSummaryLabel(language)
+                            else -> localized(language, "Resumo da série", "Series summary")
+                        },
+                        source = source, series = item, language = language, referenceAt = referenceAt
+                    )
+                }
+            }
+        }
+        if (visibleSeries.any { it.windows.isNotEmpty() || it.hourlyDistribution != null }) {
+            HistoryDetailsSection(
+                localized(language, "Janelas e distribuição horária", "Windows and hourly distribution"),
+                "historyAnalysis:$chartSelectionKey", analysisExpanded, { analysisExpanded = !analysisExpanded }, language
+            ) {
+                val outputColor = AppAccents.current.output
+                val savingsColor = AppAccents.current.savings
+                val colorOf: (UsageHistorySeries) -> Color = { item ->
+                    when (item) {
+                        weeklySummary -> outputColor
+                        monthlySummary -> savingsColor
+                        else -> accentColor
+                    }
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(AppSpacing.md)) {
+                    // 5h e 7d na diagonal do ritmo, lado a lado (#463, AH1); série sem duração
+                    // nominal conhecida (MiniMax intervalar, mensal) fica com a lista e o detalhe.
+                    val onDiagonal = visibleSeries.filter(::hasPaceDiagonal)
+                    if (onDiagonal.isNotEmpty()) {
+                        HistoryPaceWindowsRow(onDiagonal, colorOf, language)
+                    }
+                    visibleSeries.filterNot(::hasPaceDiagonal).forEach { item ->
+                        HistoryWindowAnalysisPanel(item, colorOf(item), language)
+                    }
+                }
+            }
+        }
+    }
+}

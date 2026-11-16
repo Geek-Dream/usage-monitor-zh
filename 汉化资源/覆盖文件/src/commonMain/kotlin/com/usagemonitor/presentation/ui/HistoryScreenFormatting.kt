@@ -1,0 +1,454 @@
+package com.usagemonitor.presentation.ui
+
+import androidx.compose.ui.graphics.Color
+import kotlin.math.roundToLong
+import kotlin.time.Instant
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toLocalDateTime
+import com.usagemonitor.domain.entity.ACTIVITY_TIME_ZONE_ID
+import com.usagemonitor.domain.entity.ApiSource
+import com.usagemonitor.domain.entity.AppLanguage
+import com.usagemonitor.domain.entity.DeepSeekQuotaLabels
+import com.usagemonitor.domain.entity.HistoryRange
+import com.usagemonitor.domain.entity.PeriodType
+import com.usagemonitor.domain.entity.UsageForecast
+import com.usagemonitor.domain.entity.UsageHistorySeries
+import com.usagemonitor.domain.entity.UsagePeriodComparison
+import com.usagemonitor.domain.entity.UsageUnit
+import com.usagemonitor.domain.entity.displayName
+import com.usagemonitor.domain.entity.isObservedActivitySource
+import com.usagemonitor.presentation.ui.components.HistoryChartOverlay
+import com.usagemonitor.presentation.ui.components.accentColorFor
+import com.usagemonitor.presentation.ui.theme.AppAccents
+
+/**
+ * Delega para [accentColorFor]: a mesma fonte tem de ter a mesma cor no card e no
+ * gráfico do histórico. Antes eram duas tabelas idênticas copiadas à mão.
+ *
+ * [accents] sem default: chamava [accentColorFor] sem tema em vigor, e por isso o
+ * histórico ficava preso à paleta escura no tema claro (2,64:1 medido).
+ */
+internal fun accentColorForHistorySource(source: ApiSource, accents: AppAccents): Color {
+    return accentColorFor(source, accents)
+}
+
+internal fun rangeLabel(range: HistoryRange, language: AppLanguage): String {
+    return when (range) {
+        HistoryRange.LAST_24_HOURS -> localized(language, "24h", "24h")
+        HistoryRange.LAST_7_DAYS -> localized(language, "7 dias", "7 days")
+        HistoryRange.LAST_30_DAYS -> localized(language, "30 dias", "30 days")
+        HistoryRange.TOTAL -> localized(language, "Total", "All")
+    }
+}
+
+internal fun sourceLabel(source: ApiSource): String {
+    return source.displayName()
+}
+
+internal fun historyTitle(
+    selectedSource: ApiSource?,
+    showSourceSelector: Boolean,
+    language: AppLanguage
+): String {
+    if (!showSourceSelector && selectedSource != null) {
+        return localized(language, "Histórico do ${sourceLabel(selectedSource)}", "${sourceLabel(selectedSource)} history")
+    }
+
+    return localized(language, "Histórico de uso", "Usage history")
+}
+
+internal fun historySubtitle(
+    selectedSource: ApiSource?,
+    showSourceSelector: Boolean,
+    language: AppLanguage
+): String {
+    if (selectedSource == ApiSource.DEEPSEEK) {
+        return localized(language, "Saldo restante, gasto no intervalo e tendência recente.", "Remaining balance, spend in range, and recent trend.")
+    }
+
+    if (selectedSource?.isObservedActivitySource() == true) {
+        return localized(language, "Atividade observada por modelo free nas janelas de 5h e 7d.", "Observed activity per free model across 5h and 7d windows.")
+    }
+
+    return localized(language, "Tendência, consumo médio e previsão por quota.", "Trend, average consumption, and forecast by quota.")
+}
+
+internal fun lastUpdatedLabel(lastUpdatedAt: Instant?, language: AppLanguage): String {
+    if (lastUpdatedAt == null) {
+        return localized(language, "Última coleta: —", "Last snapshot: —")
+    }
+
+    return localized(language, "Última coleta: ${formatInstant(lastUpdatedAt)}", "Last snapshot: ${formatInstant(lastUpdatedAt)}")
+}
+
+internal fun forecastLabel(forecast: UsageForecast, language: AppLanguage): String {
+    return when (forecast) {
+        UsageForecast.InsufficientData -> localized(language, "Dados insuficientes", "Insufficient data")
+        UsageForecast.NoGrowth -> localized(language, "Sem crescimento detectado", "No growth detected")
+        UsageForecast.ResetsBeforeExhaustion -> localized(language, "A janela deve reiniciar antes do limite", "Window should reset before the limit")
+        is UsageForecast.EstimatedExhaustionAt -> {
+            localized(language, "Esgota por volta de ${formatInstant(forecast.instant)}", "Expected to exhaust around ${formatInstant(forecast.instant)}")
+        }
+    }
+}
+
+internal fun deepSeekSeriesTitle(series: UsageHistorySeries, language: AppLanguage): String {
+    if (series.quotaLabel.equals(DeepSeekQuotaLabels.BALANCE, ignoreCase = true)) {
+        return localized(language, "Saldo restante", "Remaining balance")
+    }
+
+    if (series.quotaLabel.equals(DeepSeekQuotaLabels.GRANTED, ignoreCase = true)) {
+        return localized(language, "Crédito gratuito", "Free credit")
+    }
+
+    return series.quotaLabel
+}
+
+internal fun deepSeekSeriesSubtitle(series: UsageHistorySeries, language: AppLanguage): String {
+    if (series.quotaLabel.equals(DeepSeekQuotaLabels.BALANCE, ignoreCase = true)) {
+        return localized(language, "Leitura do saldo restante ao longo do intervalo selecionado.", "Remaining balance observed over the selected range.")
+    }
+
+    if (series.quotaLabel.equals(DeepSeekQuotaLabels.GRANTED, ignoreCase = true)) {
+        return localized(language, "Crédito promocional ainda disponível no período.", "Promotional credit still available in the selected range.")
+    }
+
+    return localized(language, "Saldo observado neste intervalo.", "Balance observed in this range.")
+}
+
+/**
+ * Ao contrário do card genérico, este tinha texto próprio só em
+ * [UsageForecast.EstimatedExhaustionAt] e sumia (`null`) nos outros três estados — era isso que
+ * fazia a previsão do DeepSeek "aparecer e sumir" quando o saldo parava de cair entre duas coletas
+ * (issue #140). Os outros estados delegam pro mesmo rótulo que o card genérico já usa
+ * ([forecastLabel]): nenhuma cópia nova, e os dois cards passam a concordar.
+ */
+internal fun deepSeekForecastText(forecast: UsageForecast, language: AppLanguage): String {
+    return when (forecast) {
+        is UsageForecast.EstimatedExhaustionAt -> {
+            localized(language, "Mantendo esse ritmo, o saldo pode acabar por volta de ${formatInstant(forecast.instant)}.", "At the current pace, the balance may run out around ${formatInstant(forecast.instant)}.")
+        }
+        else -> forecastLabel(forecast, language)
+    }
+}
+
+/**
+ * Fuso em que a tela recorta o dia da linha de referência.
+ *
+ * O mesmo que [formatInstant] imprime, e o mesmo do `ACTIVITY_TIME_ZONE_ID` do
+ * domain — um segundo fuso aqui faria a tela e o alerta discordarem sobre em que
+ * dia um consumo caiu.
+ */
+internal val HISTORY_TIME_ZONE: TimeZone = TimeZone.of(ACTIVITY_TIME_ZONE_ID)
+
+/**
+ * O fator do dia contra a mediana, com a contagem de dias que a formou.
+ *
+ * A contagem entra porque ela **é** a régua: `4,0×` sem dizer acima de quê não
+ * permite julgar se o número merece atenção.
+ */
+internal fun dailyBaselineLabel(factor: Double, completeDays: Int, language: AppLanguage): String {
+    val value = formatSpikeFactor(factor, language)
+    return localized(language, "${value}× ($completeDays dias)", "${value}× ($completeDays days)")
+}
+
+internal fun formatInstant(instant: Instant): String {
+    val local = instant.toLocalDateTime(TimeZone.of("America/Sao_Paulo"))
+    return "${local.date.dayOfMonth.toString().padStart(2, '0')}/${local.date.monthNumber.toString().padStart(2, '0')} ${local.hour.toString().padStart(2, '0')}:${local.minute.toString().padStart(2, '0')} BRT"
+}
+
+internal fun currentUsagePercent(used: Long, total: Long): String {
+    if (total <= 0L) return "—"
+    return (used * 100.0 / total.toDouble()).roundToLong().toString()
+}
+
+internal fun formatPercentageOfTotal(value: Double, total: Long): String {
+    if (total <= 0L) return "— %"
+    val pct = value * 100.0 / total.toDouble()
+    return "${pct.roundToLong()} %"
+}
+
+internal fun formatQuantity(value: Long): String {
+    return when {
+        // O total de tokens de sessões CLI passa de 10^9 com facilidade — cada
+        // turno relê o contexto inteiro. Sem esta faixa o número vira "1036.4M".
+        value >= 1_000_000_000L -> "${trimDecimal(value / 1_000_000_000.0)}B"
+        value >= 1_000_000L -> "${trimDecimal(value / 1_000_000.0)}M"
+        value >= 1_000L -> "${trimDecimal(value / 1_000.0)}K"
+        else -> value.toString()
+    }
+}
+
+internal fun localizedRequests(value: Long, language: AppLanguage): String {
+    return localized(language, "${formatQuantity(value)} requisições", "${formatQuantity(value)} requests")
+}
+
+internal fun formatCents(cents: Long): String {
+    val sign = if (cents < 0L) "-" else ""
+    val absCents = kotlin.math.abs(cents)
+    val dollars = absCents / 100
+    val remainder = absCents % 100
+    return "${sign}\$${dollars}.${remainder.toString().padStart(2, '0')}"
+}
+
+/**
+ * O fator da anomalia com uma casa, sem depender do `Locale` da JVM.
+ *
+ * `"%.1f".format` usaria o separador decimal da máquina, e o mesmo valor sairia
+ * `4.0` ou `4,0` conforme quem roda — o que é aceitável na tela e inaceitável num
+ * teste. Aqui o separador vem do idioma da interface, que é a mesma decisão que o
+ * resto do texto já toma.
+ */
+internal fun formatSpikeFactor(factor: Double, language: AppLanguage): String {
+    val tenths = (factor * 10.0).roundToLong().coerceAtLeast(0L)
+    val separator = localized(language, ",", ".")
+    return "${tenths / 10}$separator${tenths % 10}"
+}
+
+internal fun trimDecimal(value: Double): String {
+    val text = "%.1f".format(value)
+    return text.removeSuffix(".0").removeSuffix(",0")
+}
+
+internal fun unitSuffix(unit: UsageUnit): String {
+    return when (unit) {
+        UsageUnit.TOKENS -> "tok"
+        UsageUnit.REQUESTS -> "req"
+        UsageUnit.PERCENTAGE -> "%"
+        UsageUnit.CURRENCY_USD -> "USD"
+    }
+}
+
+internal data class OpenCodeHistoryModelReport(
+    val modelName: String,
+    val chartSeries: UsageHistorySeries,
+    val requests5h: Long,
+    val requests7d: Long
+)
+
+internal fun buildOpenCodeHistoryGroups(
+    series: List<UsageHistorySeries>,
+    selectedRange: HistoryRange
+): List<OpenCodeHistoryModelReport> {
+    val grouped = linkedMapOf<String, MutableOpenCodeHistoryGroup>()
+
+    series.forEach { item ->
+        val modelName = when {
+            item.quotaLabel.endsWith(" 5h") -> item.quotaLabel.removeSuffix(" 5h")
+            item.quotaLabel.endsWith(" 7d") -> item.quotaLabel.removeSuffix(" 7d")
+            else -> item.quotaLabel
+        }
+
+        val group = grouped.getOrPut(modelName) { MutableOpenCodeHistoryGroup(modelName) }
+        when {
+            item.quotaLabel.endsWith(" 5h") -> group.series5h = item
+            item.quotaLabel.endsWith(" 7d") -> group.series7d = item
+        }
+    }
+
+    return grouped.values.mapNotNull { group ->
+        val chartSeries = selectOpenCodeChartSeries(group, selectedRange) ?: return@mapNotNull null
+        OpenCodeHistoryModelReport(
+            modelName = group.modelName,
+            chartSeries = chartSeries,
+            requests5h = group.series5h?.currentDisplayUsed ?: 0L,
+            requests7d = group.series7d?.currentDisplayUsed ?: group.series5h?.currentDisplayUsed ?: 0L
+        )
+    }
+}
+
+internal data class MutableOpenCodeHistoryGroup(
+    val modelName: String,
+    var series5h: UsageHistorySeries? = null,
+    var series7d: UsageHistorySeries? = null
+)
+
+internal fun selectOpenCodeChartSeries(
+    group: MutableOpenCodeHistoryGroup,
+    selectedRange: HistoryRange
+): UsageHistorySeries? {
+    return when (selectedRange) {
+        HistoryRange.LAST_24_HOURS -> group.series5h ?: group.series7d
+        HistoryRange.LAST_7_DAYS,
+        HistoryRange.LAST_30_DAYS,
+        HistoryRange.TOTAL -> group.series7d ?: group.series5h
+    }
+}
+
+internal fun openCodeHistorySubtitle(
+    periodType: PeriodType,
+    language: AppLanguage
+): String {
+    return when (periodType) {
+        PeriodType.INTERVAL -> localized(language, "Atividade observada do modelo free na janela curta de 5h.", "Observed free-model activity in the 5h short window.")
+
+        PeriodType.WEEKLY -> localized(language, "Atividade observada do modelo free na janela semanal de 7 dias.", "Observed free-model activity in the 7-day weekly window.")
+        PeriodType.MONTHLY -> localized(language, "Atividade observada do modelo free na janela mensal.", "Observed free-model activity in the monthly window.")
+        PeriodType.REPORTED -> localized(language, "Janela reportada pela fonte.", "Source-reported window.")
+    }
+}
+
+internal fun historySeriesDisplayTitle(
+    source: ApiSource,
+    series: UsageHistorySeries,
+    language: AppLanguage
+): String {
+    return series.quotaLabel
+}
+
+internal fun historySeriesDisplaySubtitle(
+    source: ApiSource,
+    series: UsageHistorySeries,
+    language: AppLanguage
+): String {
+    return when (series.periodType) {
+        PeriodType.WEEKLY -> localized(language, "Quota semanal", "Weekly quota")
+        PeriodType.INTERVAL -> localized(language, "Quota intervalar", "Interval quota")
+        PeriodType.MONTHLY -> localized(language, "Quota mensal", "Monthly quota")
+        PeriodType.REPORTED -> localized(language, "Janela reportada", "Reported window")
+    }
+}
+
+internal data class GenericHistoryCardModel(
+    val baseLabel: String,
+    val chartSeries: UsageHistorySeries,
+    val weeklySummary: UsageHistorySeries?,
+    /**
+     * Cota mensal da mesma família (#382: OpenCode Go 30d, Codex mensal). Entra
+     * no mesmo card, como terceira série, só na visão "Todas" — sem valor novo em
+     * `HistoryQuotaView`, que quebraria os `when` exaustivos do seletor.
+     */
+    val monthlySummary: UsageHistorySeries? = null
+)
+
+private data class MutableGenericHistoryGroup(
+    val baseLabel: String,
+    var intervalSeries: UsageHistorySeries? = null,
+    var weeklySeries: UsageHistorySeries? = null,
+    var monthlySeries: UsageHistorySeries? = null,
+    var otherSeries: UsageHistorySeries? = null
+)
+
+/**
+ * Sufixos de janela que separam membros da mesma família de cota. O OpenCode Go
+ * escreve as janelas por extenso ("Go semanal", "Go mensal"); renomear os
+ * rótulos quebraria a série gravada, então quem aprende os nomes é o agrupador.
+ */
+private val QUOTA_WINDOW_SUFFIXES = listOf(" 5h", " 7d", " 30d", " semanal", " mensal")
+
+/**
+ * Funde as séries INTERVAL (5h) e WEEKLY (7d) da mesma quota-família num único card:
+ * o gráfico usa sempre a série INTERVAL (mais granular), e a WEEKLY vira um resumo
+ * de métricas sem gráfico próprio (ver [GenericHistoryCardModel.weeklySummary]).
+ * Quando só existe uma das duas, o card renderiza normalmente, sem fusão.
+ */
+internal fun buildGenericHistoryGroups(series: List<UsageHistorySeries>): List<GenericHistoryCardModel> {
+    val grouped = linkedMapOf<String, MutableGenericHistoryGroup>()
+
+    series.forEach { item ->
+        val suffix = QUOTA_WINDOW_SUFFIXES.firstOrNull { candidate -> item.quotaLabel.endsWith(candidate) }
+        val baseLabel = if (suffix == null) item.quotaLabel else item.quotaLabel.removeSuffix(suffix)
+
+        val group = grouped.getOrPut(baseLabel) { MutableGenericHistoryGroup(baseLabel) }
+        when (item.periodType) {
+            PeriodType.INTERVAL -> group.intervalSeries = item
+            PeriodType.WEEKLY -> group.weeklySeries = item
+            PeriodType.MONTHLY -> group.monthlySeries = item
+            PeriodType.REPORTED -> group.otherSeries = item
+        }
+    }
+
+    return grouped.values.map { group ->
+        val interval = group.intervalSeries
+        val weekly = group.weeklySeries
+        val monthly = group.monthlySeries
+        when {
+            interval != null -> GenericHistoryCardModel(group.baseLabel, interval, weekly, monthly)
+            weekly != null -> GenericHistoryCardModel(group.baseLabel, weekly, null, monthly)
+            monthly != null -> GenericHistoryCardModel(group.baseLabel, monthly, null)
+            else -> GenericHistoryCardModel(group.baseLabel, requireNotNull(group.otherSeries), null)
+        }
+    }
+}
+
+internal fun genericHistorySubtitle(language: AppLanguage): String {
+    return localized(language, "Consumo ao longo do intervalo selecionado", "Consumption across the selected range")
+}
+
+internal fun weeklySummaryLabel(language: AppLanguage): String {
+    return localized(language, "Cota semanal atual", "Current weekly quota")
+}
+
+internal fun intervalSummaryLabel(language: AppLanguage): String {
+    return localized(language, "Cota intervalar atual", "Current interval quota")
+}
+
+/**
+ * Nome curto da janela de uma série, como o usuário a vê no card e na HUD:
+ * `5h`/`7d` quando o rótulo da cota traz o sufixo, o tipo de período quando não.
+ */
+internal fun quotaWindowLabel(series: UsageHistorySeries, language: AppLanguage): String {
+    return when {
+        series.quotaLabel.endsWith(" 5h") -> "5h"
+        series.quotaLabel.endsWith(" 7d") -> "7d"
+        series.periodType == PeriodType.INTERVAL -> localized(language, "Intervalo", "Interval")
+        series.periodType == PeriodType.WEEKLY -> localized(language, "Semanal", "Weekly")
+        series.periodType == PeriodType.MONTHLY -> localized(language, "Mensal", "Monthly")
+        else -> series.quotaLabel
+    }
+}
+
+/**
+ * A semanal sobreposta à intervalar no mesmo gráfico (issue #320). Antes a
+ * semanal só existia como tabela, e a progressão dela no intervalo não aparecia
+ * em lugar nenhum. Só quando as duas são percentuais: é o eixo 0–100% comum que
+ * permite lê-las contra a mesma grade.
+ */
+internal fun historyChartOverlays(
+    weeklySummary: UsageHistorySeries?,
+    primary: UsageHistorySeries,
+    color: Color,
+    language: AppLanguage,
+    monthlySummary: UsageHistorySeries? = null,
+    monthlyColor: Color = color
+): List<HistoryChartOverlay> {
+    if (primary.unit != UsageUnit.PERCENTAGE) {
+        return emptyList()
+    }
+    return listOfNotNull(weeklySummary to color, monthlySummary to monthlyColor)
+        .mapNotNull { (series, seriesColor) ->
+            val overlay = series?.takeIf { it.unit == UsageUnit.PERCENTAGE } ?: return@mapNotNull null
+            HistoryChartOverlay(points = overlay.points, label = quotaWindowLabel(overlay, language), color = seriesColor)
+        }
+}
+
+internal fun monthlySummaryLabel(language: AppLanguage): String {
+    return localized(language, "Cota mensal atual", "Current monthly quota")
+}
+
+internal fun buildQuotaChartSelectionKey(
+    source: ApiSource,
+    quotaLabel: String,
+    periodType: PeriodType,
+    selectedRange: HistoryRange
+): String {
+    return "${source.name}:${quotaLabel}:${periodType.name}:${selectedRange.name}"
+}
+
+/**
+ * Variação contra o período anterior, como `+18%` ou `-7%`.
+ *
+ * Sem consumo anterior a variação não é 0% nem infinito: é indefinida, e a
+ * frase diz isso em vez de mostrar um número que ninguém pode interpretar.
+ */
+internal fun periodComparisonLabel(
+    comparison: UsagePeriodComparison,
+    language: AppLanguage
+): String {
+    val ratio = comparison.changeRatio
+        ?: return localized(language, "Sem consumo anterior", "No previous consumption")
+
+    val percent = (ratio * 100.0).roundToLong()
+    val sign = if (percent > 0L) "+" else ""
+    return "$sign$percent%"
+}

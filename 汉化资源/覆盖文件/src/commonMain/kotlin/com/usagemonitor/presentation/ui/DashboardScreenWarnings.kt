@@ -1,0 +1,636 @@
+package com.usagemonitor.presentation.ui
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.dp
+import com.usagemonitor.domain.entity.ApiSource
+import com.usagemonitor.domain.repository.AntigravityUsageFailureKind
+import com.usagemonitor.domain.repository.CursorUsageFailureKind
+import com.usagemonitor.domain.entity.AppLanguage
+import com.usagemonitor.domain.entity.UsageTargetKey
+import com.usagemonitor.presentation.ui.components.AppBanner
+import com.usagemonitor.presentation.ui.components.AppButton
+import com.usagemonitor.presentation.ui.components.AppButtonTone
+import com.usagemonitor.presentation.ui.components.AppTone
+import com.usagemonitor.presentation.viewmodel.AppUpdateFailureReason
+import com.usagemonitor.presentation.viewmodel.AppUpdateUiState
+import com.usagemonitor.presentation.viewmodel.UiApiError
+
+const val APP_UPDATE_BANNER_TAG = "appUpdateBanner"
+
+/** O botão da ação da faixa de atualização (issue #291). */
+const val APP_UPDATE_BANNER_ACTION_TAG = "appUpdateBannerAction"
+
+/**
+ * A ação recarrega só o alvo que falhou. Recarregar toda a fonte também refazia a
+ * coleta dos perfis saudáveis, que é justamente o custo que a tela evita ao ter um
+ * botão por banner.
+ */
+internal fun warningActionFor(
+    warning: DashboardWarning,
+    onRetryTarget: (UsageTargetKey) -> Unit
+): (() -> Unit)? {
+    // Falha de conectividade não é problema de uma fonte específica — é a rede
+    // inteira sem proxy —, então o retry vale para qualquer fonte, não só a
+    // Anthropic. Checado antes do `when` para não precisar repetir o mesmo
+    // lambda nos 8 ramos.
+    if (warning.forcesUniversalRetry) {
+        return { onRetryTarget(warning.target) }
+    }
+    // Sem rótulo não há botão: é o 429 com backoff armado, em que tentar de novo
+    // seria ignorado (issue #269).
+    if (warning.actionLabel == null) {
+        return null
+    }
+    return when (warning.source) {
+        ApiSource.ANTHROPIC -> {
+            { onRetryTarget(warning.target) }
+        }
+        ApiSource.MINIMAX -> null
+        ApiSource.CODEX -> null
+        ApiSource.DEEPSEEK -> null
+        ApiSource.OPENCODE -> null
+        ApiSource.OPENCODE_GO -> null
+        ApiSource.KILO -> null
+        ApiSource.OPENROUTER -> null
+        ApiSource.GEMINI -> null
+        ApiSource.CURSOR -> null
+        ApiSource.ANTIGRAVITY -> null
+    }
+}
+
+/**
+ * Com várias contas Anthropic o rótulo da fonte é o mesmo para todas, e dois
+ * banners idênticos não dizem qual conta precisa de atenção. `targetLabel` já
+ * chega do view model como "Anthropic — <perfil>".
+ */
+internal fun warningTargetLabel(error: UiApiError): String {
+    val label = error.targetLabel
+    if (label != null && label.isNotBlank()) {
+        return label
+    }
+    return sourceLabelFromKey(error.source)
+}
+
+internal fun warningFor(
+    error: UiApiError,
+    language: AppLanguage
+): DashboardWarning? {
+    val label = warningTargetLabel(error)
+
+    // Avaliada primeiro: falha de conectividade (proxy corporativo ausente ou
+    // incorreto, DNS, timeout de conexão) nunca teve resposta HTTP nenhuma, e
+    // não pode ser confundida com rate limit (429) ou credencial (401/403).
+    if (error.isConnectivityIssue) {
+        return DashboardWarning(
+            target = error.target,
+            title = localized(language, "$label sem conexão", "$label could not connect"),
+            description = localized(
+                language,
+                "Não foi possível conectar ao servidor. Se a rede exige proxy corporativo, configure-o em Configurações > Rede e reinicie o Usage Monitor para aplicar (não é preciso reiniciar o computador).",
+                "Could not connect to the server. If the network requires a corporate proxy, configure it under Settings > Network and restart Usage Monitor to apply it (no need to restart your computer)."
+            ),
+            actionLabel = localized(language, "Tentar novamente", "Retry"),
+            forcesUniversalRetry = true
+        )
+    }
+
+    if (error.isProxyAuthIssue) {
+        return DashboardWarning(
+            target = error.target,
+            title = localized(language, "Proxy exige autenticação", "Proxy requires authentication"),
+            description = localized(
+                language,
+                "O proxy configurado recusou a credencial enviada (HTTP 407). Revise usuário e senha em Configurações > Rede e reinicie o Usage Monitor.",
+                "The configured proxy rejected the sent credential (HTTP 407). Review the username and password under Settings > Network and restart Usage Monitor."
+            ),
+            actionLabel = null
+        )
+    }
+
+    val retryAt = error.retryAt
+    if (error.isRateLimitIssue && retryAt != null) {
+        // Com o backoff armado o banner diz a hora da próxima tentativa em vez de
+        // oferecer um "Tentar novamente" que não iria à rede (issue #269).
+        val clock = formatRetryClock(retryAt)
+        return DashboardWarning(
+            target = error.target,
+            title = localized(language, "$label temporariamente limitado", "$label is temporarily limited"),
+            description = localized(
+                language,
+                "A API respondeu HTTP 429. O app não consulta esta conta até $clock BRT, porque cada tentativa durante o limite só o prolonga. Os números da última leitura continuam no card.",
+                "The API returned HTTP 429. The app will not query this account until $clock BRT, because every attempt during the limit only extends it. The last reading stays on the card."
+            ),
+            actionLabel = null
+        )
+    }
+
+    if (error.isRateLimitIssue) {
+        return DashboardWarning(
+            target = error.target,
+            title = localized(language, "$label temporariamente limitado", "$label is temporarily limited"),
+            description = localized(
+                language,
+                "A API respondeu HTTP 429. Isso normalmente é limite de requisições ou cota temporária do próprio serviço; estar logado no Claude Code não evita esse bloqueio. Aguarde a janela de limite liberar e tente novamente.",
+                "The API returned HTTP 429. This usually means a request limit or temporary quota window on the service side; being signed in to Claude Code does not bypass it. Wait for the limit window to clear, then retry."
+            ),
+            actionLabel = localized(language, "Tentar novamente", "Retry")
+        )
+    }
+
+    if (error.isServiceUnavailableIssue) {
+        return DashboardWarning(
+            target = error.target,
+            title = localized(language, "$label temporariamente indisponível", "$label is temporarily unavailable"),
+            description = localized(
+                language,
+                "O serviço remoto respondeu com indisponibilidade temporária ou falha de upstream. Aguarde alguns instantes e tente novamente. As outras integrações podem continuar funcionando normalmente.",
+                "The remote service returned a temporary unavailability or upstream failure. Wait a few moments and retry. Other integrations can continue working normally."
+            ),
+            actionLabel = localized(language, "Tentar novamente", "Retry")
+        )
+    }
+
+    if (error.isAnthropicCredentialIssue) {
+        val hasScopeGuidance = error.message.contains(
+            "Sua sessão do Claude Code está sem a permissão esperada ou desatualizada",
+            ignoreCase = true
+        ) || error.message.contains(
+            "Claude Code session is missing the expected permission or is outdated",
+            ignoreCase = true
+        )
+
+        if (hasScopeGuidance) {
+            return DashboardWarning(
+                target = error.target,
+                title = localized(language, "$label precisa revalidar a sessão", "$label needs the session refreshed"),
+                description = localized(
+                    language,
+                    "1. Feche o Usage Monitor.\n2. Abra o Claude Code e confirme que a sessão está ativa; se preciso, faça login novamente.\n3. Abra o Usage Monitor outra vez.\n4. Se ainda falhar, desative temporariamente Anthropic nas configurações para continuar vendo as outras APIs.",
+                    "1. Close Usage Monitor.\n2. Open Claude Code and confirm the session is active; sign in again if needed.\n3. Open Usage Monitor again.\n4. If it still fails, temporarily disable Anthropic in settings so the other APIs keep working."
+                ),
+                actionLabel = localized(language, "Tentar novamente", "Retry")
+            )
+        }
+
+        return DashboardWarning(
+            target = error.target,
+            title = localized(language, "$label precisa de autenticação", "$label needs authentication"),
+            description = localized(
+                language,
+                "Faça login no Claude Code para recriar ou renovar a credencial (`~/.claude/.credentials.json`; no macOS, a entrada `Claude Code-credentials` do Keychain) e depois tente novamente.",
+                "Sign in with Claude Code to recreate or renew the credential (`~/.claude/.credentials.json`; on macOS the `Claude Code-credentials` Keychain entry), then try again."
+            ),
+            actionLabel = localized(language, "Tentar novamente", "Retry")
+        )
+    }
+
+    if (error.isMiniMaxApiKeyIssue) {
+        return DashboardWarning(
+            target = error.target,
+            title = localized(language, "MiniMax precisa de uma API key", "MiniMax needs an API key"),
+            description = localized(
+                language,
+                "Abra Configurações > APIs, informe a chave da MiniMax e tente atualizar novamente.",
+                "Open Settings > APIs, enter the MiniMax key, and try refreshing again."
+            ),
+            actionLabel = null
+        )
+    }
+
+    if (error.isMiniMaxInactivePlanIssue) {
+        return DashboardWarning(
+            target = error.target,
+            title = localized(language, "MiniMax sem plano/token ativo", "MiniMax has no active plan/token"),
+            description = localized(
+                language,
+                "A conta MiniMax respondeu que não há assinatura ativa para consultar as cotas. Ative um plano ou gere um token vinculado a uma assinatura válida e depois atualize o monitor.",
+                "The MiniMax account reported that there is no active subscription available for quota checks. Activate a plan or generate a token tied to a valid subscription, then refresh the monitor."
+            ),
+            actionLabel = null
+        )
+    }
+
+    if (error.isOpenCodeLocalIssue) {
+        return DashboardWarning(
+            target = error.target,
+            title = localized(language, "OpenCode Zen Free indisponível", "OpenCode Zen Free is unavailable"),
+            description = localized(
+                language,
+                "O banco local do OpenCode não foi encontrado. Abra o OpenCode pelo menos uma vez nesta máquina para gerar `~/.local/share/opencode/opencode.db`.",
+                "The local OpenCode database was not found. Open OpenCode at least once on this machine to create `~/.local/share/opencode/opencode.db`."
+            ),
+            actionLabel = null
+        )
+    }
+
+    if (error.isOpenCodeGoApiKeyIssue) {
+        return DashboardWarning(
+            target = error.target,
+            title = localized(language, "OpenCode Go precisa de uma API key", "OpenCode Go needs an API key"),
+            description = localized(
+                language,
+                "Abra Configurações > APIs, informe a chave da API do OpenCode (a mesma usada pelo Zen) e tente atualizar novamente.",
+                "Open Settings > APIs, enter the OpenCode API key (the same one Zen uses), and try refreshing again."
+            ),
+            actionLabel = null
+        )
+    }
+
+    // Chave válida numa conta sem o plano Go: nada há para corrigir na credencial,
+    // então o banner não oferece "Tentar novamente" — repetir a chamada devolveria
+    // o mesmo 403.
+    if (error.isOpenCodeGoSubscriptionIssue) {
+        return DashboardWarning(
+            target = error.target,
+            title = localized(language, "OpenCode Go sem assinatura ativa", "OpenCode Go has no active subscription"),
+            description = localized(
+                language,
+                "A chave informada é válida, mas a conta não tem o plano Go. Assine o plano Go em opencode.ai ou desative esta integração em Configurações > APIs. O saldo pago do Zen não é exposto por API e não é lido aqui.",
+                "The key is valid, but the account has no Go plan. Subscribe to Go at opencode.ai or disable this integration under Settings > APIs. The paid Zen balance is not exposed by any API and is not read here."
+            ),
+            actionLabel = null
+        )
+    }
+
+    if (error.isGeminiSessionHistoryUnreadable) {
+        return DashboardWarning(
+            target = error.target,
+            title = localized(language, "Histórico local do Gemini CLI indisponível", "Gemini CLI local history is unavailable"),
+            description = localized(
+                language,
+                "Os arquivos de sessão locais não contêm registros de uso reconhecidos. Verifique se o histórico foi gerado pelo Gemini CLI e atualize novamente.",
+                "The local session files contain no recognized usage records. Check that Gemini CLI generated the history, then refresh."
+            ),
+            actionLabel = null
+        )
+    }
+
+    error.antigravityFailureKind?.let { kind ->
+        return antigravityWarning(error, kind, language)
+    }
+
+    error.cursorFailureKind?.let { kind ->
+        return cursorWarning(error, kind, language)
+    }
+
+    if (error.isKiloLocalIssue) {
+        return DashboardWarning(
+            target = error.target,
+            title = localized(language, "Kilo Free indisponível", "Kilo Free is unavailable"),
+            description = localized(
+                language,
+                "O banco local do Kilo não foi encontrado. Abra o Kilo pelo menos uma vez nesta máquina para gerar `~/.local/share/kilo/kilo.db`.",
+                "The local Kilo database was not found. Open Kilo at least once on this machine to create `~/.local/share/kilo/kilo.db`."
+            ),
+            actionLabel = null
+        )
+    }
+
+    return null
+}
+
+/**
+ * Faixa de uma linha só. O banner antigo era o `PersistentApiWarningBanner`
+ * genérico — título, parágrafo de descrição e `Button` empilhados —, e ficava fixo
+ * no topo do dashboard empurrando os cards enquanto a atualização não fosse
+ * instalada (issue #67).
+ *
+ * A ação é um [AppButton] de verdade, não um rótulo com seta (issue #291): a faixa
+ * inteira clicável com "Reiniciar… →" no tom do estado não parecia botão, e só o
+ * hover revelava o alvo. A faixa deixou de ser clicável junto — com o botão dentro
+ * dela, clicar fora dele faria a mesma ação sem nada indicar isso.
+ *
+ * Com a atualização automática ligada a faixa ganhou mais três estados. O
+ * progresso é **texto**, nunca indicador animado: animação sem fim trava o
+ * `waitForIdle` dos testes de componente, e é a mesma regra que já vale para o
+ * resto do app.
+ */
+@Composable
+internal fun AppUpdateBanner(
+    state: AppUpdateUiState,
+    language: AppLanguage,
+    onOpenRelease: () -> Unit,
+    onRestartAndUpdate: () -> Unit = {},
+    modifier: Modifier = Modifier
+) {
+    val content = updateBannerContent(state = state, language = language)
+    val action = updateBannerAction(
+        state = state,
+        onOpenRelease = onOpenRelease,
+        onRestartAndUpdate = onRestartAndUpdate
+    )
+    val actionLabel = content.actionLabel
+
+    // É o [AppBanner] do sistema, não um `Surface` próprio: mesma superfície,
+    // mesma borda de 1dp, mesmo marcador de 2dp à esquerda. A faixa continua sem
+    // descrição, porque ela repetiria em prosa o que o rótulo da ação diz.
+    AppBanner(
+        title = content.title,
+        tone = content.tone,
+        modifier = modifier.testTag(APP_UPDATE_BANNER_TAG),
+        action = if (actionLabel == null || action == null) {
+            null
+        } else {
+            {
+                AppButton(
+                    label = actionLabel,
+                    onClick = action,
+                    // DEFAULT e não PRIMARY: primária é uma por tela, e a faixa
+                    // convive com o dashboard inteiro.
+                    tone = AppButtonTone.DEFAULT,
+                    modifier = Modifier.testTag(APP_UPDATE_BANNER_ACTION_TAG)
+                )
+            }
+        }
+    )
+}
+
+/**
+ * O que a ação da atualização faz em cada estado. O despacho mora junto dos
+ * rótulos de [updateBannerContent] e tem uma dona só: a faixa do modo padrão e o
+ * balão da engrenagem da HUD oferecem a mesma ação, e dois `when` divergiriam.
+ */
+internal fun updateBannerAction(
+    state: AppUpdateUiState,
+    onOpenRelease: () -> Unit,
+    onRestartAndUpdate: () -> Unit
+): (() -> Unit)? {
+    return when (state) {
+        is AppUpdateUiState.Available -> onOpenRelease
+        is AppUpdateUiState.Downloaded -> onRestartAndUpdate
+        is AppUpdateUiState.Failed -> onOpenRelease
+        // Baixando não tem ação: um alvo clicável sem rótulo de ação seria um
+        // alvo de clique invisível.
+        is AppUpdateUiState.Downloading -> null
+    }
+}
+
+/**
+ * A ação de aplicar a atualização pronta (issue #274). Diz **o que** reinicia:
+ * "Reiniciar e atualizar agora" era lido como reiniciar o computador. "o app" e
+ * não "o Usage Monitor": a faixa é de uma linha e quem cede espaço é o título, e
+ * com o nome inteiro o rótulo passava de ~209dp para ~281dp e o título sumia numa
+ * janela de 400dp. O nome do app vai no título. Constantes porque o passo da ajuda
+ * cita o rótulo, e uma cópia literal lá divergiria na primeira troca de texto.
+ */
+internal const val UPDATE_RESTART_ACTION_PT = "Reiniciar o app e atualizar"
+internal const val UPDATE_RESTART_ACTION_EN = "Restart app and update"
+
+internal fun updateBannerContent(
+    state: AppUpdateUiState,
+    language: AppLanguage
+): UpdateBannerContent {
+    val version = state.update.version
+    // Beta diz "beta" em texto em toda frase (issue #355): a cor da faixa é a
+    // mesma da estável, e cor nunca informa sozinha.
+    val isBeta = state.update.isPrerelease
+    val versionNoun = when {
+        isBeta -> localized(language, "versão beta", "beta version")
+        else -> localized(language, "versão", "version")
+    }
+
+    val content = when (state) {
+        is AppUpdateUiState.Available -> UpdateBannerContent(
+            title = localized(language, "Nova $versionNoun $version disponível", "${versionNoun.capitalized()} $version is available"),
+            actionLabel = localized(language, "Baixar atualização", "Download update"),
+            tone = AppTone.INFO,
+            headline = localized(language, "Nova versão $version", "New version $version"),
+            detail = localized(language, "Baixe pela página da versão", "Download it from the release page")
+        )
+
+        is AppUpdateUiState.Downloading -> UpdateBannerContent(
+            title = localized(
+                language,
+                if (state.percent == null) {
+                    "Baixando a $versionNoun $version…"
+                } else {
+                    "Baixando a $versionNoun $version — ${state.percent}%"
+                },
+                if (state.percent == null) {
+                    "Downloading $versionNoun $version…"
+                } else {
+                    "Downloading $versionNoun $version — ${state.percent}%"
+                }
+            ),
+            actionLabel = null,
+            tone = AppTone.INFO,
+            // O percentual desce para o detalhe: "Downloading 138.100.100 — 100%"
+            // passa da largura do banner do balão.
+            headline = localized(language, "Baixando $version", "Downloading $version"),
+            detail = localized(
+                language,
+                if (state.percent == null) "Em segundo plano" else "${state.percent}% concluído",
+                if (state.percent == null) "In the background" else "${state.percent}% done"
+            )
+        )
+
+        is AppUpdateUiState.Downloaded -> UpdateBannerContent(
+            title = localized(language, "${versionNoun.capitalized()} $version pronta — será aplicada ao fechar o Usage Monitor", "${versionNoun.capitalized()} $version is ready — applies when Usage Monitor closes"),
+            actionLabel = localized(language, UPDATE_RESTART_ACTION_PT, UPDATE_RESTART_ACTION_EN),
+            tone = AppTone.OK,
+            headline = localized(language, "Versão $version pronta", "Version $version ready"),
+            detail = localized(language, "Aplicada ao fechar o Usage Monitor", "Applies when Usage Monitor closes")
+        )
+
+        is AppUpdateUiState.Failed -> UpdateBannerContent(
+            title = updateFailureTitle(version = version, noun = versionNoun, reason = state.reason, language = language),
+            // O caminho manual é o comportamento que o app sempre teve; a falha
+            // do automático devolve o usuário a ele em vez de deixá-lo sem saída.
+            actionLabel = localized(language, "Baixar manualmente", "Download manually"),
+            tone = AppTone.WARNING,
+            headline = localized(language, "Falha na versão $version", "Version $version failed"),
+            detail = updateFailureDetail(reason = state.reason, language = language)
+        )
+    }
+
+    if (!isBeta) {
+        return content
+    }
+    // A linha curta do balão da HUD tem largura fixa de uma linha, e o número de
+    // uma beta ("42.10.10-beta.12") não cabe ao lado do estado — medido em
+    // `HudNotchTextFitTest`. O estado fica com a palavra "beta"; o número desce
+    // para o detalhe, que tem duas linhas.
+    return content.copy(
+        headline = betaUpdateHeadline(state = state, language = language),
+        detail = "$version · ${content.detail}"
+    )
+}
+
+private fun betaUpdateHeadline(state: AppUpdateUiState, language: AppLanguage): String {
+    return when (state) {
+        is AppUpdateUiState.Available -> localized(language, "Nova versão beta", "New beta version")
+        is AppUpdateUiState.Downloading -> localized(language, "Baixando a beta", "Downloading beta")
+        is AppUpdateUiState.Downloaded -> localized(language, "Beta pronta", "Beta ready")
+        is AppUpdateUiState.Failed -> localized(language, "Falha na beta", "Beta failed")
+    }
+}
+
+/** A falha em poucas palavras, para o banner estreito do balão da HUD. */
+private fun updateFailureDetail(reason: AppUpdateFailureReason, language: AppLanguage): String {
+    return when (reason) {
+        AppUpdateFailureReason.DOWNLOAD -> localized(language, "O download não terminou", "The download did not finish")
+        AppUpdateFailureReason.SCHEDULE -> localized(language, "A instalação não iniciou", "The install did not start")
+    }
+}
+
+private fun updateFailureTitle(
+    version: String,
+    /** "versão"/"version", ou a forma com "beta" (issue #355). */
+    noun: String,
+    reason: AppUpdateFailureReason,
+    language: AppLanguage
+): String {
+    return when (reason) {
+        AppUpdateFailureReason.DOWNLOAD -> localized(language, "Falha ao baixar a $noun $version", "Could not download $noun $version")
+
+        AppUpdateFailureReason.SCHEDULE -> localized(language, "Falha ao iniciar a instalação da $noun $version", "Could not start the $noun $version install")
+    }
+}
+
+private fun String.capitalized(): String = replaceFirstChar { char -> char.uppercaseChar() }
+
+internal data class DashboardWarning(
+    val target: UsageTargetKey,
+    val title: String,
+    val description: String,
+    val actionLabel: String?,
+    /**
+     * Falha de conectividade (issue #174) não é problema de uma fonte
+     * específica — sem essa marca, ela virava banner sem ação (só a Anthropic
+     * tem retry em [warningActionFor]) e o usuário atrás de proxy corporativo
+     * perdia o botão "Tentar novamente" que o erro genérico já oferecia antes.
+     */
+    val forcesUniversalRetry: Boolean = false
+) {
+    val source: ApiSource
+        get() = target.source
+}
+
+internal data class UpdateBannerContent(
+    /** A frase de uma linha da faixa do modo padrão, e a descrição semântica. */
+    val title: String,
+    /** Nulo quando o estado não oferece ação — a faixa fica sem botão. */
+    val actionLabel: String?,
+    val tone: AppTone,
+    /**
+     * O mesmo aviso partido em dois (issue #291), para o banner do balão da
+     * engrenagem da HUD, que tem 240dp: o título inteiro numa linha só sairia
+     * cortado, e em duas linhas coloridas era o texto solto que a issue apontou.
+     */
+    val headline: String,
+    val detail: String
+)
+
+/**
+ * Nenhum dos quatro oferece "Tentar novamente": todos dependem de uma ação fora do
+ * app (instalar, atualizar, autenticar) ou de reiniciá-lo, e repetir a coleta
+ * devolveria a mesma falha.
+ */
+private fun antigravityWarning(
+    error: UiApiError,
+    kind: AntigravityUsageFailureKind,
+    language: AppLanguage
+): DashboardWarning {
+    val (title, description) = when (kind) {
+        AntigravityUsageFailureKind.CLI_NOT_INSTALLED,
+        AntigravityUsageFailureKind.UNSUPPORTED_LAUNCHER -> localized(
+            language,
+            "Antigravity CLI não encontrado",
+            "Antigravity CLI not found"
+        ) to localized(
+            language,
+            "Instale o Antigravity CLI (agy) ou desative esta integração em Configurações > APIs. " +
+                "O monitor procura o executável agy em %LOCALAPPDATA%\\agy\\bin e no PATH, nunca um atalho .cmd ou .bat.",
+            "Install the Antigravity CLI (agy) or disable this integration under Settings > APIs. " +
+                "The monitor looks for the agy executable in %LOCALAPPDATA%\\agy\\bin and on PATH, never a .cmd or .bat shim."
+        )
+        AntigravityUsageFailureKind.UNVERIFIED_VERSION -> localized(
+            language,
+            "Atualize o Antigravity CLI",
+            "Update the Antigravity CLI"
+        ) to localized(
+            language,
+            "Esta integração foi verificada com o agy 1.2.9 ou mais novo. Rode `agy update` e o monitor volta a ler as cotas na próxima coleta.",
+            "This integration was verified against agy 1.2.9 or newer. Run `agy update` and the monitor reads the quotas again on the next refresh."
+        )
+        AntigravityUsageFailureKind.AUTHENTICATION_UNAVAILABLE -> localized(
+            language,
+            "Antigravity CLI sem login",
+            "Antigravity CLI is signed out"
+        ) to localized(
+            language,
+            "Abra o agy num terminal e faça login. O monitor usa a sessão que já existe e não inicia login por conta própria.",
+            "Open agy in a terminal and sign in. The monitor uses the existing session and never starts a sign-in itself."
+        )
+        AntigravityUsageFailureKind.COLLECTION_PAUSED -> localized(
+            language,
+            "Coleta do Antigravity pausada",
+            "Antigravity collection paused"
+        ) to localized(
+            language,
+            "O CLI não confirmou ter respondido /usage sozinho, e a próxima chamada poderia gastar cota de modelo. A coleta fica parada até o Usage Monitor ser reiniciado.",
+            "The CLI did not confirm that it answered /usage by itself, and another call could spend model quota. Collection stays paused until Usage Monitor is restarted."
+        )
+    }
+    return DashboardWarning(
+        target = error.target,
+        title = title,
+        description = description,
+        actionLabel = null
+    )
+}
+
+/**
+ * Nenhum oferece "Tentar novamente": instalar ou entrar no Cursor acontece fora do
+ * app, e o plano sem nada a medir continua igual na próxima coleta.
+ */
+private fun cursorWarning(
+    error: UiApiError,
+    kind: CursorUsageFailureKind,
+    language: AppLanguage
+): DashboardWarning {
+    val (title, description) = when (kind) {
+        CursorUsageFailureKind.NOT_INSTALLED -> localized(
+            language,
+            "Cursor não encontrado",
+            "Cursor not found"
+        ) to localized(
+            language,
+            "O banco local do editor Cursor não existe nesta máquina. Instale e abra o Cursor, ou desative esta integração em Configurações > APIs.",
+            "The Cursor editor's local database does not exist on this machine. Install and open Cursor, or disable this integration under Settings > APIs."
+        )
+        CursorUsageFailureKind.SIGNED_OUT, CursorUsageFailureKind.SESSION_REJECTED -> localized(
+            language,
+            "Cursor sem sessão",
+            "Cursor is signed out"
+        ) to localized(
+            language,
+            "Entre na sua conta no editor Cursor. O monitor usa a sessão que o editor já mantém e não inicia login por conta própria.",
+            "Sign in to your account in the Cursor editor. The monitor uses the session the editor already keeps and never starts a sign-in itself."
+        )
+        CursorUsageFailureKind.NOTHING_METERED -> localized(
+            language,
+            "Cursor sem franquia medida",
+            "Cursor has nothing metered"
+        ) to localized(
+            language,
+            "O plano desta conta não informa nenhuma franquia com percentual ou teto. Isso não é consumo zero: não há o que medir.",
+            "This account's plan reports no allowance with a percentage or a ceiling. That is not zero usage: there is nothing to measure."
+        )
+    }
+    return DashboardWarning(
+        target = error.target,
+        title = title,
+        description = description,
+        actionLabel = null
+    )
+}
